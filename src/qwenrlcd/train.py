@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+from pathlib import Path
+from typing import Any
+
+
+def load_config(path: str | Path) -> dict[str, Any]:
+    with Path(path).open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train a calibrated categorical decision model")
+    parser.add_argument("--config", required=True, type=Path)
+    args = parser.parse_args()
+    config = load_config(args.config)
+
+    import torch
+    from accelerate import Accelerator
+    from torch.optim import AdamW
+    from torch.utils.data import DataLoader
+    from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
+
+    from .data import DecisionCollator, DecisionDataset, read_jsonl
+    from .losses import decision_loss
+    from .model import DecisionModel
+
+    seed = int(config["seed"])
+    random.seed(seed)
+    torch.manual_seed(seed)
+
+    accelerator = Accelerator(
+        gradient_accumulation_steps=int(config["gradient_accumulation_steps"]),
+        mixed_precision="bf16",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        config["model_id"], trust_remote_code=bool(config.get("trust_remote_code", True))
+    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+    # The marker and options are at the end. Preserve that tail for long records so
+    # the pooled token is always the terminal decision marker.
+    tokenizer.truncation_side = "left"
+
+    records = read_jsonl(config["train_file"])
+    dataset = DecisionDataset(
+        records,
+        tokenizer,
+        max_length=int(config["max_length"]),
+        max_choices=int(config["max_choices"]),
+        shuffle_options=bool(config["shuffle_options"]),
+        seed=seed,
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_size=int(config["micro_batch_size"]),
+        shuffle=True,
+        collate_fn=DecisionCollator(tokenizer, int(config["max_choices"])),
+        pin_memory=True,
+    )
+    validation_dataset = DecisionDataset(
+        read_jsonl(config["validation_file"]),
+        tokenizer,
+        max_length=int(config["max_length"]),
+        max_choices=int(config["max_choices"]),
+        shuffle_options=False,
+        seed=seed,
+    )
+    validation_dataloader = DataLoader(
+        validation_dataset,
+        batch_size=int(config["micro_batch_size"]),
+        shuffle=False,
+        collate_fn=DecisionCollator(tokenizer, int(config["max_choices"])),
+        pin_memory=True,
+    )
+
+    model = DecisionModel.from_pretrained(
+        config["model_id"],
+        max_choices=int(config["max_choices"]),
+        trust_remote_code=bool(config.get("trust_remote_code", True)),
+    )
+    if config.get("gradient_checkpointing", True):
+        model.enable_gradient_checkpointing()
+
+    lora = config.get("lora", {})
+    if lora.get("enabled", False):
+        model.attach_lora(
+            rank=int(lora["rank"]),
+            alpha=int(lora["alpha"]),
+            dropout=float(lora["dropout"]),
+            target_modules=lora["target_modules"],
+        )
+
+    head_parameters = list(model.decision_head.parameters())
+    head_ids = {id(parameter) for parameter in head_parameters}
+    backbone_parameters = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad and id(parameter) not in head_ids
+    ]
+    optimizer = AdamW(
+        [
+            {"params": backbone_parameters, "lr": float(config["learning_rate"])},
+            {"params": head_parameters, "lr": float(config["head_learning_rate"])},
+        ],
+        weight_decay=float(config["weight_decay"]),
+        fused=torch.cuda.is_available(),
+    )
+
+    update_steps_per_epoch = math.ceil(
+        len(dataloader) / int(config["gradient_accumulation_steps"])
+    )
+    total_steps = update_steps_per_epoch * int(config["epochs"])
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=max(1, int(total_steps * float(config["warmup_ratio"]))),
+        num_training_steps=total_steps,
+    )
+    model, optimizer, dataloader, validation_dataloader, scheduler = accelerator.prepare(
+        model, optimizer, dataloader, validation_dataloader, scheduler
+    )
+
+    output_dir = Path(config["output_dir"])
+    if accelerator.is_main_process:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        tokenizer.save_pretrained(output_dir / "tokenizer")
+        (output_dir / "training_config.json").write_text(
+            json.dumps(config, indent=2) + "\n", encoding="utf-8"
+        )
+    accelerator.wait_for_everyone()
+
+    global_step = 0
+    validation_history: list[dict[str, float | int]] = []
+    model.train()
+    for epoch in range(int(config["epochs"])):
+        dataset.set_epoch(epoch)
+        for batch_index, batch in enumerate(dataloader):
+            with accelerator.accumulate(model):
+                logits = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    decision_indices=batch["decision_indices"],
+                )
+                losses = decision_loss(
+                    logits,
+                    batch["targets"],
+                    batch["num_choices"],
+                    ce_weight=float(config["ce_weight"]),
+                    brier_weight=float(config["brier_weight"]),
+                )
+                accelerator.backward(losses.total)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), float(config["max_grad_norm"]))
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            if accelerator.sync_gradients:
+                global_step += 1
+                if global_step % int(config["log_every"]) == 0:
+                    accelerator.print(
+                        f"epoch={epoch} step={global_step}/{total_steps} "
+                        f"loss={losses.total.item():.4f} "
+                        f"ce={losses.cross_entropy.item():.4f} "
+                        f"brier={losses.brier.item():.4f}"
+                    )
+                if global_step % int(config["save_every"]) == 0:
+                    accelerator.save_state(output_dir / f"checkpoint-{global_step}")
+
+        model.eval()
+        validation_losses: list[float] = []
+        validation_probabilities: list[list[float]] = []
+        validation_targets: list[list[float]] = []
+        with torch.no_grad():
+            for batch in validation_dataloader:
+                logits = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    decision_indices=batch["decision_indices"],
+                )
+                losses = decision_loss(
+                    logits,
+                    batch["targets"],
+                    batch["num_choices"],
+                    ce_weight=float(config["ce_weight"]),
+                    brier_weight=float(config["brier_weight"]),
+                )
+                slots = torch.arange(logits.shape[-1], device=logits.device)
+                valid = slots.unsqueeze(0) < batch["num_choices"].unsqueeze(1)
+                probabilities = torch.softmax(
+                    logits.masked_fill(~valid, float("-inf")), dim=-1
+                )
+                gathered_loss, gathered_probabilities, gathered_targets = (
+                    accelerator.gather_for_metrics(
+                        (
+                            losses.total.detach().repeat(logits.shape[0]),
+                            probabilities,
+                            batch["targets"],
+                        )
+                    )
+                )
+                validation_losses.extend(gathered_loss.float().cpu().tolist())
+                validation_probabilities.extend(
+                    gathered_probabilities.float().cpu().tolist()
+                )
+                validation_targets.extend(gathered_targets.float().cpu().tolist())
+
+        from .metrics import calibration_metrics
+
+        calibration = calibration_metrics(validation_probabilities, validation_targets)
+        epoch_metrics: dict[str, float | int] = {
+            "epoch": epoch,
+            "step": global_step,
+            "loss": sum(validation_losses) / len(validation_losses),
+            "accuracy": calibration.accuracy,
+            "brier": calibration.brier,
+            "nll": calibration.nll,
+            "ece": calibration.ece,
+        }
+        validation_history.append(epoch_metrics)
+        accelerator.print(
+            "validation "
+            + " ".join(
+                f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
+                for key, value in epoch_metrics.items()
+            )
+        )
+        model.train()
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        unwrapped = accelerator.unwrap_model(model)
+        unwrapped.save_components(output_dir / "final")
+        (output_dir / "validation_metrics.json").write_text(
+            json.dumps(validation_history, indent=2) + "\n", encoding="utf-8"
+        )
+        accelerator.print(f"saved final model components to {output_dir / 'final'}")
+
+
+if __name__ == "__main__":
+    main()

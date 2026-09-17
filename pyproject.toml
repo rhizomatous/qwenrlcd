@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qwenrlcd"
+version = "0.1.0"
+description = "Experiments in fast, typed, calibrated language-model decisions"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.optional-dependencies]
+train = [
+  "accelerate>=1.10",
+  "peft>=0.18",
+  "safetensors>=0.5",
+  "torch>=2.7",
+  "transformers>=5.3",
+]
+dev = [
+  "pytest>=8.3",
+  "ruff>=0.12",
+]
+
+[project.scripts]
+qwenrlcd-train = "qwenrlcd.train:main"
+qwenrlcd-synthetic = "qwenrlcd.synthetic:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qwenrlcd"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
