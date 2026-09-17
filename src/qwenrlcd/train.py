@@ -242,7 +242,9 @@ def main() -> None:
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        unwrapped = accelerator.unwrap_model(model)
+        # The default keeps Accelerate's autocast/output-conversion forward wrapper.
+        # Remove it so the original and freshly loaded models use identical precision.
+        unwrapped = accelerator.unwrap_model(model, keep_fp32_wrapper=False)
         unwrapped.eval()
         verification_batch = next(iter(validation_dataloader))
         with torch.inference_mode():
