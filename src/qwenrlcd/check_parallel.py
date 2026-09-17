@@ -12,8 +12,8 @@ def main() -> None:
         description="Verify packed questions match isolated Qwen evaluations"
     )
     parser.add_argument("--config", required=True, type=Path)
-    parser.add_argument("--atol", type=float, default=0.005)
-    parser.add_argument("--rtol", type=float, default=0.005)
+    parser.add_argument("--atol", type=float, default=0.0001)
+    parser.add_argument("--rtol", type=float, default=0.0001)
     args = parser.parse_args()
     config = load_config(args.config)
 
@@ -27,6 +27,11 @@ def main() -> None:
         raise SystemExit("CUDA is required for the real-model parallelism check")
 
     torch.manual_seed(int(config["seed"]))
+    # Test the attention topology independently of BF16 accumulation drift across
+    # the different matrix shapes used by packed and singleton evaluations.
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     tokenizer = AutoTokenizer.from_pretrained(
         config["model_id"], trust_remote_code=bool(config.get("trust_remote_code", True))
     )
@@ -37,6 +42,7 @@ def main() -> None:
     model = DecisionModel.from_pretrained(
         config["model_id"],
         max_choices=int(config["max_choices"]),
+        dtype=torch.float32,
         trust_remote_code=bool(config.get("trust_remote_code", True)),
         attn_implementation=config.get("attn_implementation", "eager"),
     )
@@ -108,13 +114,13 @@ def main() -> None:
 
     max_singleton_delta = 0.0
     max_reordered_delta = 0.0
+    comparisons: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     for question in bundle.questions:
         size = len(question.options)
         bundled = bundled_by_id[question.id][:size]
         singleton = singleton_by_id[question.id][:size]
         reordered = reversed_by_id[question.id][:size]
-        torch.testing.assert_close(singleton, bundled, atol=args.atol, rtol=args.rtol)
-        torch.testing.assert_close(reordered, bundled, atol=args.atol, rtol=args.rtol)
+        comparisons.append((bundled, singleton, reordered))
         max_singleton_delta = max(
             max_singleton_delta, float((singleton - bundled).abs().max())
         )
@@ -122,10 +128,16 @@ def main() -> None:
             max_reordered_delta, float((reordered - bundled).abs().max())
         )
 
+    print("parallel invariance diagnostics", flush=True)
+    print("precision=float32 tf32=false", flush=True)
+    print(f"questions={len(bundle.questions)}", flush=True)
+    print(f"max_singleton_logit_delta={max_singleton_delta:.6f}", flush=True)
+    print(f"max_reordered_logit_delta={max_reordered_delta:.6f}", flush=True)
+
+    for bundled, singleton, reordered in comparisons:
+        torch.testing.assert_close(singleton, bundled, atol=args.atol, rtol=args.rtol)
+        torch.testing.assert_close(reordered, bundled, atol=args.atol, rtol=args.rtol)
     print("parallel invariance passed")
-    print(f"questions={len(bundle.questions)}")
-    print(f"max_singleton_logit_delta={max_singleton_delta:.6f}")
-    print(f"max_reordered_logit_delta={max_reordered_delta:.6f}")
 
 
 if __name__ == "__main__":
