@@ -13,11 +13,11 @@ dependencies = []
 
 [project.optional-dependencies]
 train = [
-  "accelerate>=1.10",
-  "peft>=0.18",
+  "accelerate==1.15.0",
+  "peft==0.21.0",
   "safetensors>=0.5",
-  "torch>=2.7",
-  "transformers>=5.3",
+  "torch==2.14.0",
+  "transformers==5.17.0",
 ]
 dev = [
   "pytest>=8.3",

@@ -45,7 +45,4 @@ tmux new -s qwenrlcd
 bash setup/runpod-smoke.sh
 ```
 
-The preflight uses strict FP32 to test packed/singleton/reordered mask invariance
-without BF16 accumulation drift. Training itself remains BF16.
-
 Detach with `Ctrl-b`, then `d`; reattach with `tmux attach -t qwenrlcd`.
