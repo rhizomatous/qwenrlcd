@@ -27,6 +27,7 @@ dev = [
 [project.scripts]
 qwenrlcd-train = "qwenrlcd.train:main"
 qwenrlcd-synthetic = "qwenrlcd.synthetic:main"
+qwenrlcd-check-parallel = "qwenrlcd.check_parallel:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qwenrlcd"]

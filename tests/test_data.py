@@ -1,18 +1,107 @@
 from __future__ import annotations
 
-from qwenrlcd.data import read_jsonl, write_jsonl
-from qwenrlcd.synthetic import generate_records
+from qwenrlcd.data import DecisionDataset, build_tree_attention_pattern, read_jsonl, write_jsonl
+from qwenrlcd.schema import DecisionBundle
+from qwenrlcd.synthetic import generate_bundles
+
+from .test_schema import example_dict
+
+
+class WhitespaceTokenizer:
+    pad_token_id = 0
+
+    def __init__(self) -> None:
+        self.vocabulary: dict[str, int] = {"<pad>": self.pad_token_id}
+
+    def __call__(self, text: str, *, add_special_tokens: bool) -> dict[str, list[int]]:
+        assert add_special_tokens is False
+        ids = []
+        for token in text.split():
+            if token not in self.vocabulary:
+                self.vocabulary[token] = len(self.vocabulary)
+            ids.append(self.vocabulary[token])
+        return {"input_ids": ids}
 
 
 def test_jsonl_round_trip(tmp_path) -> None:
-    records = generate_records(12, seed=9)
-    path = tmp_path / "records.jsonl"
-    write_jsonl(records, path)
-    loaded = read_jsonl(path)
-    assert loaded == records
+    bundles = generate_bundles(6, seed=9)
+    path = tmp_path / "bundles.jsonl"
+    write_jsonl(bundles, path)
+    assert read_jsonl(path) == bundles
 
 
-def test_synthetic_data_contains_choice_and_noul() -> None:
-    records = generate_records(12, seed=3)
-    types = {record.question.type.value for record in records}
-    assert types == {"choice", "noul"}
+def test_synthetic_bundle_contains_all_question_types() -> None:
+    bundle = generate_bundles(1, seed=3)[0]
+    assert {question.type.value for question in bundle.questions} == {
+        "choice",
+        "noul",
+        "score",
+    }
+
+
+def test_tree_attention_isolates_branches() -> None:
+    pattern = build_tree_attention_pattern(
+        sequence_length=8,
+        state_length=3,
+        branch_spans=((3, 5), (5, 8)),
+    )
+
+    assert pattern[2][:3] == (True, True, True)
+    assert pattern[4][:5] == (True, True, True, True, True)
+    assert not any(pattern[4][5:])
+    assert pattern[7][:3] == (True, True, True)
+    assert not any(pattern[7][3:5])
+    assert pattern[7][5:8] == (True, True, True)
+
+
+def test_dataset_resets_logical_positions_for_each_question() -> None:
+    tokenizer = WhitespaceTokenizer()
+    bundle = DecisionBundle.from_dict(example_dict())
+    dataset = DecisionDataset(
+        [bundle],
+        tokenizer,
+        max_length=512,
+        max_choices=255,
+        max_questions=16,
+        shuffle=False,
+        seed=1,
+    )
+
+    example = dataset[0]
+    state_length = example["state_length"]
+    for start, end in example["branch_spans"]:
+        assert example["position_ids"][start] == state_length
+        assert example["position_ids"][end - 1] == state_length + (end - start) - 1
+    assert example["decision_indices"] == [end - 1 for _, end in example["branch_spans"]]
+
+
+def test_bundle_and_singleton_have_identical_branch_inputs() -> None:
+    tokenizer = WhitespaceTokenizer()
+    bundle = DecisionBundle.from_dict(example_dict())
+
+    def encode(value: DecisionBundle) -> dict:
+        return DecisionDataset(
+            [value],
+            tokenizer,
+            max_length=512,
+            max_choices=255,
+            max_questions=16,
+            shuffle=False,
+            seed=1,
+        )[0]
+
+    bundled = encode(bundle)
+    for question_index, question in enumerate(bundle.questions):
+        singleton = encode(DecisionBundle(f"single-{question.id}", bundle.state, (question,)))
+        bundled_start, bundled_end = bundled["branch_spans"][question_index]
+        single_start, single_end = singleton["branch_spans"][0]
+
+        assert bundled["input_ids"][: bundled["state_length"]] == singleton["input_ids"][
+            : singleton["state_length"]
+        ]
+        assert bundled["input_ids"][bundled_start:bundled_end] == singleton["input_ids"][
+            single_start:single_end
+        ]
+        assert bundled["position_ids"][bundled_start:bundled_end] == singleton[
+            "position_ids"
+        ][single_start:single_end]

@@ -14,7 +14,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a calibrated categorical decision model")
+    parser = argparse.ArgumentParser(description="Train a parallel calibrated decision model")
     parser.add_argument("--config", required=True, type=Path)
     args = parser.parse_args()
     config = load_config(args.config)
@@ -27,6 +27,7 @@ def main() -> None:
 
     from .data import DecisionCollator, DecisionDataset, read_jsonl
     from .losses import decision_loss
+    from .metrics import calibration_metrics
     from .model import DecisionModel
 
     seed = int(config["seed"])
@@ -43,39 +44,42 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-    # The marker and options are at the end. Preserve that tail for long records so
-    # the pooled token is always the terminal decision marker.
-    tokenizer.truncation_side = "left"
 
-    records = read_jsonl(config["train_file"])
-    dataset = DecisionDataset(
-        records,
+    collator = DecisionCollator(
+        tokenizer,
+        max_choices=int(config["max_choices"]),
+        max_questions=int(config["max_questions"]),
+    )
+    train_dataset = DecisionDataset(
+        read_jsonl(config["train_file"]),
         tokenizer,
         max_length=int(config["max_length"]),
         max_choices=int(config["max_choices"]),
-        shuffle_options=bool(config["shuffle_options"]),
-        seed=seed,
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=int(config["micro_batch_size"]),
+        max_questions=int(config["max_questions"]),
         shuffle=True,
-        collate_fn=DecisionCollator(tokenizer, int(config["max_choices"])),
-        pin_memory=True,
+        seed=seed,
     )
     validation_dataset = DecisionDataset(
         read_jsonl(config["validation_file"]),
         tokenizer,
         max_length=int(config["max_length"]),
         max_choices=int(config["max_choices"]),
-        shuffle_options=False,
+        max_questions=int(config["max_questions"]),
+        shuffle=False,
         seed=seed,
+    )
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=int(config["micro_batch_size"]),
+        shuffle=True,
+        collate_fn=collator,
+        pin_memory=True,
     )
     validation_dataloader = DataLoader(
         validation_dataset,
         batch_size=int(config["micro_batch_size"]),
         shuffle=False,
-        collate_fn=DecisionCollator(tokenizer, int(config["max_choices"])),
+        collate_fn=collator,
         pin_memory=True,
     )
 
@@ -83,6 +87,7 @@ def main() -> None:
         config["model_id"],
         max_choices=int(config["max_choices"]),
         trust_remote_code=bool(config.get("trust_remote_code", True)),
+        attn_implementation=config.get("attn_implementation", "eager"),
     )
     if config.get("gradient_checkpointing", True):
         model.enable_gradient_checkpointing()
@@ -113,7 +118,7 @@ def main() -> None:
     )
 
     update_steps_per_epoch = math.ceil(
-        len(dataloader) / int(config["gradient_accumulation_steps"])
+        len(train_dataloader) / int(config["gradient_accumulation_steps"])
     )
     total_steps = update_steps_per_epoch * int(config["epochs"])
     scheduler = get_cosine_schedule_with_warmup(
@@ -121,8 +126,10 @@ def main() -> None:
         num_warmup_steps=max(1, int(total_steps * float(config["warmup_ratio"]))),
         num_training_steps=total_steps,
     )
-    model, optimizer, dataloader, validation_dataloader, scheduler = accelerator.prepare(
-        model, optimizer, dataloader, validation_dataloader, scheduler
+    model, optimizer, train_dataloader, validation_dataloader, scheduler = (
+        accelerator.prepare(
+            model, optimizer, train_dataloader, validation_dataloader, scheduler
+        )
     )
 
     output_dir = Path(config["output_dir"])
@@ -138,24 +145,28 @@ def main() -> None:
     validation_history: list[dict[str, float | int]] = []
     model.train()
     for epoch in range(int(config["epochs"])):
-        dataset.set_epoch(epoch)
-        for batch_index, batch in enumerate(dataloader):
+        train_dataset.set_epoch(epoch)
+        for batch in train_dataloader:
             with accelerator.accumulate(model):
                 logits = model(
                     input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
+                    position_ids=batch["position_ids"],
+                    tree_attention_mask=batch["tree_attention_mask"],
                     decision_indices=batch["decision_indices"],
                 )
                 losses = decision_loss(
                     logits,
                     batch["targets"],
                     batch["num_choices"],
+                    batch["question_mask"],
                     ce_weight=float(config["ce_weight"]),
                     brier_weight=float(config["brier_weight"]),
                 )
                 accelerator.backward(losses.total)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), float(config["max_grad_norm"]))
+                    accelerator.clip_grad_norm_(
+                        model.parameters(), float(config["max_grad_norm"])
+                    )
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -180,37 +191,34 @@ def main() -> None:
             for batch in validation_dataloader:
                 logits = model(
                     input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
+                    position_ids=batch["position_ids"],
+                    tree_attention_mask=batch["tree_attention_mask"],
                     decision_indices=batch["decision_indices"],
                 )
                 losses = decision_loss(
                     logits,
                     batch["targets"],
                     batch["num_choices"],
+                    batch["question_mask"],
                     ce_weight=float(config["ce_weight"]),
                     brier_weight=float(config["brier_weight"]),
                 )
-                slots = torch.arange(logits.shape[-1], device=logits.device)
-                valid = slots.unsqueeze(0) < batch["num_choices"].unsqueeze(1)
-                probabilities = torch.softmax(
-                    logits.masked_fill(~valid, float("-inf")), dim=-1
-                )
-                gathered_loss, gathered_probabilities, gathered_targets = (
+                gathered_loss, probabilities, targets, question_mask = (
                     accelerator.gather_for_metrics(
                         (
                             losses.total.detach().repeat(logits.shape[0]),
-                            probabilities,
+                            losses.probabilities,
                             batch["targets"],
+                            batch["question_mask"],
                         )
                     )
                 )
                 validation_losses.extend(gathered_loss.float().cpu().tolist())
-                validation_probabilities.extend(
-                    gathered_probabilities.float().cpu().tolist()
-                )
-                validation_targets.extend(gathered_targets.float().cpu().tolist())
-
-        from .metrics import calibration_metrics
+                probabilities = probabilities.float().cpu()
+                targets = targets.float().cpu()
+                question_mask = question_mask.cpu()
+                validation_probabilities.extend(probabilities[question_mask].tolist())
+                validation_targets.extend(targets[question_mask].tolist())
 
         calibration = calibration_metrics(validation_probabilities, validation_targets)
         epoch_metrics: dict[str, float | int] = {
@@ -219,8 +227,8 @@ def main() -> None:
             "loss": sum(validation_losses) / len(validation_losses),
             "accuracy": calibration.accuracy,
             "brier": calibration.brier,
-            "nll": calibration.nll,
-            "ece": calibration.ece,
+            "nll": calibration.negative_log_likelihood,
+            "ece": calibration.expected_calibration_error,
         }
         validation_history.append(epoch_metrics)
         accelerator.print(

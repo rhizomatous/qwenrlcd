@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 import torch
 from torch import nn
 
 
 class DecisionModel(nn.Module):
+    """Qwen3 with isolated packed question branches and a shared decision head."""
+
     def __init__(self, backbone: nn.Module, hidden_size: int, max_choices: int = 255) -> None:
         super().__init__()
         self.backbone = backbone
@@ -23,24 +25,26 @@ class DecisionModel(nn.Module):
         max_choices: int = 255,
         dtype: torch.dtype = torch.bfloat16,
         trust_remote_code: bool = True,
+        attn_implementation: str = "eager",
     ) -> DecisionModel:
         from transformers import AutoModelForCausalLM
 
-        # Transformers unwraps Qwen3.5's composite checkpoint into its text-only
-        # Qwen3_5ForCausalLM class. This avoids loading the unused vision tower.
         causal_lm = AutoModelForCausalLM.from_pretrained(
             model_id,
             dtype=dtype,
             trust_remote_code=trust_remote_code,
+            attn_implementation=attn_implementation,
         )
         backbone = causal_lm.base_model
         if backbone is causal_lm and hasattr(causal_lm, "model"):
             backbone = causal_lm.model
 
         config = getattr(backbone, "config", causal_lm.config)
+        if getattr(config, "model_type", None) != "qwen3":
+            raise ValueError(
+                "packed tree attention currently requires a full-attention Qwen3 checkpoint"
+            )
         hidden_size = getattr(config, "hidden_size", None)
-        if hidden_size is None and hasattr(config, "text_config"):
-            hidden_size = config.text_config.hidden_size
         if hidden_size is None:
             raise ValueError("could not determine backbone hidden size")
 
@@ -78,21 +82,34 @@ class DecisionModel(nn.Module):
         self,
         *,
         input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        tree_attention_mask: torch.Tensor,
         decision_indices: torch.Tensor,
     ) -> torch.Tensor:
+        mask_dtype = next(self.backbone.parameters()).dtype
+        additive_mask = torch.zeros(
+            (*tree_attention_mask.shape[:1], 1, *tree_attention_mask.shape[1:]),
+            dtype=mask_dtype,
+            device=tree_attention_mask.device,
+        )
+        additive_mask.masked_fill_(
+            ~tree_attention_mask.unsqueeze(1), torch.finfo(mask_dtype).min
+        )
+
+        # Passing the layer-name mapping bypasses Transformers' ordinary triangular
+        # mask construction and supplies our shared-prefix/tree topology directly.
         outputs = self.backbone(
             input_ids=input_ids,
-            attention_mask=attention_mask,
+            attention_mask={"full_attention": additive_mask},
+            position_ids=position_ids,
             use_cache=False,
             return_dict=True,
         )
-        hidden_states = getattr(outputs, "last_hidden_state", None)
-        if hidden_states is None:
-            hidden_states = outputs.hidden_states[-1]
+        hidden_states = outputs.last_hidden_state
 
-        rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
-        pooled = hidden_states[rows, decision_indices]
+        batch_rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
+        batch_rows = batch_rows.unsqueeze(1).expand_as(decision_indices)
+        pooled = hidden_states[batch_rows, decision_indices]
         pooled = pooled.to(dtype=self.decision_head.weight.dtype)
         return self.decision_head(pooled)
 
@@ -106,6 +123,13 @@ class DecisionModel(nn.Module):
             torch.save(self.backbone.state_dict(), destination / "backbone.pt")
         torch.save(self.decision_head.state_dict(), destination / "decision_head.pt")
         (destination / "decision_config.json").write_text(
-            json.dumps({"max_choices": self.max_choices}, indent=2) + "\n",
+            json.dumps(
+                {
+                    "max_choices": self.max_choices,
+                    "attention_topology": "causal_state_isolated_question_tree",
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )

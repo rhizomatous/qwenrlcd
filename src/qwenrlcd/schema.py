@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import random
 from dataclasses import dataclass
@@ -7,13 +8,20 @@ from enum import StrEnum
 from typing import Any, Mapping, Sequence
 
 MAX_CHOICES = 255
-MAX_SCORE_LEVELS = 10
+MAX_QUESTIONS = 64
 
 
 class QuestionType(StrEnum):
     CHOICE = "choice"
     NOUL = "noul"
     SCORE = "score"
+
+
+def _require_jsonlike(value: Any, label: str) -> None:
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be JSON-serializable") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,113 +32,145 @@ class Option:
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key.strip():
             raise ValueError("option key must be a non-empty string")
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Option:
-        return cls(key=value["key"], description=value.get("description"))
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"key": self.key, "description": self.description}
+        _require_jsonlike(self.description, "option description")
 
 
 @dataclass(frozen=True, slots=True)
 class Question:
+    id: str
     type: QuestionType
     instructions: Any
     options: tuple[Option, ...]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.instructions, (str, Mapping, Sequence)):
-            raise ValueError("question instructions must be JSON-like text or structure")
-
-        option_count = len(self.options)
-        if not 2 <= option_count <= MAX_CHOICES:
-            raise ValueError(f"questions require 2 to {MAX_CHOICES} options")
-
-        keys = [option.key for option in self.options]
-        if len(keys) != len(set(keys)):
-            raise ValueError("option keys must be unique")
-
-        if self.type is QuestionType.NOUL and option_count != 2:
-            raise ValueError("noul questions require exactly two options")
-        if self.type is QuestionType.SCORE and option_count > MAX_SCORE_LEVELS:
-            raise ValueError(f"score questions support at most {MAX_SCORE_LEVELS} levels")
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Question:
-        return cls(
-            type=QuestionType(value["type"]),
-            instructions=value["instructions"],
-            options=tuple(Option.from_dict(option) for option in value["options"]),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": self.type.value,
-            "instructions": self.instructions,
-            "options": [option.to_dict() for option in self.options],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class DecisionRecord:
-    id: str
-    state: Any
-    question: Question
     target: Mapping[str, float]
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
-            raise ValueError("record id must be a non-empty string")
+            raise ValueError("question id must be a non-empty string")
+        _require_jsonlike(self.instructions, "question instructions")
 
-        option_keys = {option.key for option in self.question.options}
-        target_keys = set(self.target)
-        unknown = target_keys - option_keys
+        if not 2 <= len(self.options) <= MAX_CHOICES:
+            raise ValueError(f"questions require 2 to {MAX_CHOICES} options")
+        keys = [option.key for option in self.options]
+        if len(keys) != len(set(keys)):
+            raise ValueError("option keys must be unique within a question")
+        if self.type is QuestionType.NOUL and keys != ["false", "true"]:
+            raise ValueError("noul options must be ordered as false, true")
+        if self.type is QuestionType.SCORE and keys != [str(i) for i in range(len(keys))]:
+            raise ValueError("score option keys must be consecutive levels starting at 0")
+
+        unknown = set(self.target) - set(keys)
         if unknown:
             raise ValueError(f"target refers to unknown options: {sorted(unknown)}")
-
-        values = list(self.target.values())
-        if not values:
+        probabilities = list(self.target.values())
+        if not probabilities:
             raise ValueError("target distribution cannot be empty")
-        if any(not math.isfinite(value) or value < 0 for value in values):
+        if any(not math.isfinite(value) or value < 0 for value in probabilities):
             raise ValueError("target probabilities must be finite and non-negative")
-        if not math.isclose(sum(values), 1.0, rel_tol=0.0, abs_tol=1e-6):
+        if not math.isclose(sum(probabilities), 1.0, rel_tol=0.0, abs_tol=1e-6):
             raise ValueError("target probabilities must sum to one")
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> DecisionRecord:
+    def from_entry(cls, question_id: str, value: Mapping[str, Any]) -> Question:
+        question_type = QuestionType(value["type"])
+        criteria = value.get("criteria")
+
+        if question_type is QuestionType.CHOICE:
+            if not isinstance(criteria, Mapping):
+                raise ValueError("choice criteria must be an option-to-description map")
+            options = tuple(Option(str(key), description) for key, description in criteria.items())
+        elif question_type is QuestionType.SCORE:
+            if not isinstance(criteria, Sequence) or isinstance(criteria, (str, bytes)):
+                raise ValueError("score criteria must be an ordered list of levels")
+            options = tuple(
+                Option(str(index), description)
+                for index, description in enumerate(criteria)
+            )
+        else:
+            if criteria is not None and not isinstance(criteria, Mapping):
+                raise ValueError("noul criteria must be an optional true/false map")
+            criteria = criteria or {}
+            options = (
+                Option("false", criteria.get("false", "The statement is false")),
+                Option("true", criteria.get("true", "The statement is true")),
+            )
+
+        target = {str(key): float(probability) for key, probability in value["target"].items()}
+        return cls(
+            id=question_id,
+            type=question_type,
+            instructions=value["instructions"],
+            options=options,
+            target=target,
+        )
+
+    def to_entry(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "type": self.type.value,
+            "instructions": self.instructions,
+        }
+        if self.type is QuestionType.CHOICE:
+            value["criteria"] = {option.key: option.description for option in self.options}
+        elif self.type is QuestionType.SCORE:
+            value["criteria"] = [option.description for option in self.options]
+        else:
+            value["criteria"] = {option.key: option.description for option in self.options}
+        value["target"] = dict(self.target)
+        return value
+
+    def target_vector(self) -> list[float]:
+        return [float(self.target.get(option.key, 0.0)) for option in self.options]
+
+    def expected_score(self) -> float:
+        if self.type is not QuestionType.SCORE:
+            raise ValueError("expected_score is only defined for score questions")
+        return sum(index * probability for index, probability in enumerate(self.target_vector()))
+
+    def permuted_options(self, rng: random.Random) -> Question:
+        if self.type is not QuestionType.CHOICE:
+            return self
+        options = list(self.options)
+        rng.shuffle(options)
+        return Question(self.id, self.type, self.instructions, tuple(options), self.target)
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionBundle:
+    id: str
+    state: Any
+    questions: tuple[Question, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("bundle id must be a non-empty string")
+        _require_jsonlike(self.state, "state")
+        if not 1 <= len(self.questions) <= MAX_QUESTIONS:
+            raise ValueError(f"bundles require 1 to {MAX_QUESTIONS} questions")
+        question_ids = [question.id for question in self.questions]
+        if len(question_ids) != len(set(question_ids)):
+            raise ValueError("question ids must be unique within a bundle")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> DecisionBundle:
+        questions = value.get("questions")
+        if not isinstance(questions, Mapping):
+            raise ValueError("questions must be a map keyed by question id")
         return cls(
             id=value["id"],
             state=value["state"],
-            question=Question.from_dict(value["question"]),
-            target={key: float(probability) for key, probability in value["target"].items()},
+            questions=tuple(
+                Question.from_entry(str(question_id), question)
+                for question_id, question in questions.items()
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "state": self.state,
-            "question": self.question.to_dict(),
-            "target": dict(self.target),
+            "questions": {question.id: question.to_entry() for question in self.questions},
         }
 
-    def target_vector(self) -> list[float]:
-        return [float(self.target.get(option.key, 0.0)) for option in self.question.options]
-
-    def answer_index(self) -> int:
-        vector = self.target_vector()
-        return max(range(len(vector)), key=vector.__getitem__)
-
-    def permuted(self, rng: random.Random) -> DecisionRecord:
-        options = list(self.question.options)
-        rng.shuffle(options)
-        return DecisionRecord(
-            id=self.id,
-            state=self.state,
-            question=Question(
-                type=self.question.type,
-                instructions=self.question.instructions,
-                options=tuple(options),
-            ),
-            target=self.target,
-        )
+    def permuted(self, rng: random.Random) -> DecisionBundle:
+        questions = [question.permuted_options(rng) for question in self.questions]
+        rng.shuffle(questions)
+        return DecisionBundle(self.id, self.state, tuple(questions))

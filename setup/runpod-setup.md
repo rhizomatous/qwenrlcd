@@ -1,22 +1,23 @@
-# Setting up qwenrlcd
+# Running qwenrlcd on one Runpod GPU
+
+The scripts make the environment reproducible and keep large caches on persistent
+storage. Pod creation, repository transfer, result retrieval, and stopping billing
+remain manual.
 
 ## 1. Create the pod
 
-Recommended starting point:
-
-| Setting | Value |
+| Setting | Recommendation |
 |---|---|
-| GPU | 1× A100 80 GB (H100 80 GB is also suitable) |
-| Template | A current PyTorch/CUDA image with a working NVIDIA driver |
-| Persistent volume | At least 50 GB, mounted at `/workspace` |
-| Repository location | Somewhere below `/workspace` |
+| GPU | 1× A100 80 GB; H100 80 GB is also suitable |
+| Template | Current PyTorch/CUDA image with a working NVIDIA driver |
+| Persistent volume | At least 50 GB mounted at `/workspace` |
+| Repository | `/workspace/qwenrlcd` |
 
-The scripts install their own Python 3.12 environment. They only depend on the
-image for the NVIDIA driver, basic shell tools, and `curl`.
+The scripts manage Python 3.12 and project dependencies. The first implementation
+uses eager attention with a dense quadratic tree mask, so begin with the tiny smoke
+configuration even though the backbone is only 1.7B parameters.
 
 ## 2. Put the repository on persistent storage
-
-Clone it:
 
 ```bash
 cd /workspace
@@ -24,25 +25,23 @@ git clone rhizomatous/qwenrlcd
 cd qwenrlcd
 ```
 
-## 3. Initialize the environment
+## 3. Initialize
 
 ```bash
 bash setup/runpod-init.sh
 ```
 
-If Hugging Face ratelimits the pod, authenticate before initialization with `hf auth login` or export an `HF_TOKEN`.
+This installs `uv` when necessary, installs Python 3.12, syncs training and test
+dependencies, verifies CUDA/BF16, runs local tests, caches
+`Qwen/Qwen3-1.7B-Base`, and reports decision-marker tokenization. It is idempotent.
 
-## 4. Set up to run
+ If the Hub rate-limits the pod, run `hf auth login` or export an `HF_TOKEN`.
 
-Use `tmux` so an SSH disconnect does not kill training:
+## 4. Run training in tmux
 
 ```bash
 source setup/runpod-activate.sh
 tmux new -s qwenrlcd
 ```
 
-Detach with `Ctrl-b`, then `d`. Reattach with:
-
-```bash
-tmux attach -t qwenrlcd
-```
+Detach with `Ctrl-b`, then `d`; reattach with `tmux attach -t qwenrlcd`.

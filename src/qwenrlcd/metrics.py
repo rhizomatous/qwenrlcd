@@ -35,7 +35,10 @@ def calibration_metrics(
         correct.append(float(predicted_index == target_index))
         confidences.append(float(predicted[predicted_index]))
         brier_total += sum((p - y) ** 2 for p, y in zip(predicted, target, strict=True))
-        nll_total -= sum(y * math.log(max(p, 1e-12)) for p, y in zip(predicted, target, strict=True))
+        nll_total -= sum(
+            y * math.log(max(p, 1e-12))
+            for p, y in zip(predicted, target, strict=True)
+        )
 
     ece = 0.0
     count = len(correct)

@@ -1,14 +1,14 @@
 {
-  "model_id": "Qwen/Qwen3.5-2B-Base",
+  "model_id": "Qwen/Qwen3-1.7B-Base",
   "train_file": "data/smoke_train.jsonl",
   "validation_file": "data/smoke_validation.jsonl",
-  "output_dir": "outputs/qwen3.5-2b-decision-smoke",
+  "output_dir": "outputs/qwen3-1.7b-parallel-smoke",
   "seed": 17,
   "max_length": 2048,
+  "max_questions": 32,
   "max_choices": 255,
-  "shuffle_options": true,
   "epochs": 1,
-  "micro_batch_size": 8,
+  "micro_batch_size": 2,
   "gradient_accumulation_steps": 4,
   "learning_rate": 0.0002,
   "head_learning_rate": 0.001,
@@ -17,10 +17,11 @@
   "max_grad_norm": 1.0,
   "ce_weight": 1.0,
   "brier_weight": 0.25,
-  "log_every": 5,
+  "log_every": 1,
   "save_every": 100,
   "gradient_checkpointing": true,
   "trust_remote_code": true,
+  "attn_implementation": "eager",
   "lora": {
     "enabled": true,
     "rank": 32,
@@ -31,13 +32,9 @@
       "k_proj",
       "v_proj",
       "o_proj",
-      "in_proj_qkvz",
-      "in_proj_ba",
-      "out_proj",
       "gate_proj",
       "up_proj",
       "down_proj"
     ]
   }
 }
-
