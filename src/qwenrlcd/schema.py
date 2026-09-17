@@ -41,7 +41,7 @@ class Question:
     type: QuestionType
     instructions: Any
     options: tuple[Option, ...]
-    target: Mapping[str, float]
+    target: Mapping[str, float] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -57,6 +57,9 @@ class Question:
             raise ValueError("noul options must be ordered as false, true")
         if self.type is QuestionType.SCORE and keys != [str(i) for i in range(len(keys))]:
             raise ValueError("score option keys must be consecutive levels starting at 0")
+
+        if self.target is None:
+            return
 
         unknown = set(self.target) - set(keys)
         if unknown:
@@ -94,7 +97,17 @@ class Question:
                 Option("true", criteria.get("true", "The statement is true")),
             )
 
-        target = {str(key): float(probability) for key, probability in value["target"].items()}
+        raw_target = value.get("target")
+        if raw_target is not None and not isinstance(raw_target, Mapping):
+            raise ValueError("target must be an option-to-probability map")
+        target = (
+            {
+                str(key): float(probability)
+                for key, probability in raw_target.items()
+            }
+            if raw_target is not None
+            else None
+        )
         return cls(
             id=question_id,
             type=question_type,
@@ -114,10 +127,13 @@ class Question:
             value["criteria"] = [option.description for option in self.options]
         else:
             value["criteria"] = {option.key: option.description for option in self.options}
-        value["target"] = dict(self.target)
+        if self.target is not None:
+            value["target"] = dict(self.target)
         return value
 
     def target_vector(self) -> list[float]:
+        if self.target is None:
+            raise ValueError(f"question {self.id} has no training target")
         return [float(self.target.get(option.key, 0.0)) for option in self.options]
 
     def expected_score(self) -> float:

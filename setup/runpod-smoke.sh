@@ -24,5 +24,12 @@ PY
 test -f "$QWENRLCD_OUTPUT_DIR/final/decision_head.pt"
 test -f "$QWENRLCD_OUTPUT_DIR/validation_metrics.json"
 
+uv run qwenrlcd-predict \
+  --run-dir "$QWENRLCD_OUTPUT_DIR" \
+  --input data/smoke_inference.jsonl \
+  --output "$QWENRLCD_OUTPUT_DIR/smoke_predictions.jsonl"
+test -s "$QWENRLCD_OUTPUT_DIR/smoke_predictions.jsonl"
+
 echo "[smoke] passed"
 echo "[smoke] metrics: $QWENRLCD_OUTPUT_DIR/validation_metrics.json"
+echo "[smoke] predictions: $QWENRLCD_OUTPUT_DIR/smoke_predictions.jsonl"

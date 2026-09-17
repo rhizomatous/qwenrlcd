@@ -11,10 +11,17 @@ from torch import nn
 class DecisionModel(nn.Module):
     """Qwen3 with isolated packed question branches and a shared decision head."""
 
-    def __init__(self, backbone: nn.Module, hidden_size: int, max_choices: int = 255) -> None:
+    def __init__(
+        self,
+        backbone: nn.Module,
+        hidden_size: int,
+        max_choices: int = 255,
+        base_model_id: str | None = None,
+    ) -> None:
         super().__init__()
         self.backbone = backbone
         self.max_choices = max_choices
+        self.base_model_id = base_model_id
         self.decision_head = nn.Linear(hidden_size, max_choices)
 
     @classmethod
@@ -48,8 +55,57 @@ class DecisionModel(nn.Module):
         if hidden_size is None:
             raise ValueError("could not determine backbone hidden size")
 
-        model = cls(backbone=backbone, hidden_size=hidden_size, max_choices=max_choices)
+        model = cls(
+            backbone=backbone,
+            hidden_size=hidden_size,
+            max_choices=max_choices,
+            base_model_id=model_id,
+        )
         del causal_lm
+        return model
+
+    @classmethod
+    def load_components(
+        cls,
+        input_dir: str | Path,
+        *,
+        model_id: str | None = None,
+        dtype: torch.dtype = torch.bfloat16,
+        trust_remote_code: bool = True,
+        attn_implementation: str = "eager",
+        is_trainable: bool = False,
+    ) -> DecisionModel:
+        source = Path(input_dir)
+        with (source / "decision_config.json").open(encoding="utf-8") as handle:
+            decision_config = json.load(handle)
+
+        resolved_model_id = model_id or decision_config.get("base_model_id")
+        if not resolved_model_id:
+            raise ValueError("base model id is required to reload saved components")
+
+        model = cls.from_pretrained(
+            resolved_model_id,
+            max_choices=int(decision_config["max_choices"]),
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+            attn_implementation=attn_implementation,
+        )
+
+        adapter_dir = source / "backbone"
+        if not (adapter_dir / "adapter_config.json").is_file():
+            raise ValueError(
+                f"{adapter_dir} is not a saved PEFT adapter; full-backbone reload "
+                "is not implemented"
+            )
+        from peft import PeftModel
+
+        model.backbone = PeftModel.from_pretrained(
+            model.backbone, adapter_dir, is_trainable=is_trainable
+        )
+        head_state = torch.load(
+            source / "decision_head.pt", map_location="cpu", weights_only=True
+        )
+        model.decision_head.load_state_dict(head_state)
         return model
 
     def enable_gradient_checkpointing(self) -> None:
@@ -126,6 +182,7 @@ class DecisionModel(nn.Module):
             json.dumps(
                 {
                     "max_choices": self.max_choices,
+                    "base_model_id": self.base_model_id,
                     "attention_topology": "causal_state_isolated_question_tree",
                 },
                 indent=2,

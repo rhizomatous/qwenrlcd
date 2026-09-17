@@ -75,3 +75,16 @@ def test_target_cannot_name_unknown_option() -> None:
     value["questions"]["route"]["target"] = {"elsewhere": 1.0}
     with pytest.raises(ValueError, match="unknown options"):
         DecisionBundle.from_dict(value)
+
+
+def test_unlabeled_bundle_round_trips_for_inference() -> None:
+    value = example_dict()
+    for question in value["questions"].values():
+        question.pop("target")
+
+    bundle = DecisionBundle.from_dict(value)
+
+    assert all(question.target is None for question in bundle.questions)
+    assert DecisionBundle.from_dict(bundle.to_dict()) == bundle
+    with pytest.raises(ValueError, match="has no training target"):
+        bundle.questions[0].target_vector()

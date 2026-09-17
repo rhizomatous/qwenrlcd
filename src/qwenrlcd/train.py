@@ -243,11 +243,43 @@ def main() -> None:
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unwrapped = accelerator.unwrap_model(model)
+        unwrapped.eval()
+        verification_batch = next(iter(validation_dataloader))
+        with torch.inference_mode():
+            reference_logits = unwrapped(
+                input_ids=verification_batch["input_ids"],
+                position_ids=verification_batch["position_ids"],
+                tree_attention_mask=verification_batch["tree_attention_mask"],
+                decision_indices=verification_batch["decision_indices"],
+            ).float()
+
         unwrapped.save_components(output_dir / "final")
         (output_dir / "validation_metrics.json").write_text(
             json.dumps(validation_history, indent=2) + "\n", encoding="utf-8"
         )
         accelerator.print(f"saved final model components to {output_dir / 'final'}")
+
+        reloaded = DecisionModel.load_components(
+            output_dir / "final",
+            model_id=config["model_id"],
+            dtype=torch.bfloat16,
+            trust_remote_code=bool(config.get("trust_remote_code", True)),
+            attn_implementation=config.get("attn_implementation", "eager"),
+        ).to(accelerator.device)
+        reloaded.eval()
+        with torch.inference_mode():
+            reloaded_logits = reloaded(
+                input_ids=verification_batch["input_ids"],
+                position_ids=verification_batch["position_ids"],
+                tree_attention_mask=verification_batch["tree_attention_mask"],
+                decision_indices=verification_batch["decision_indices"],
+            ).float()
+        torch.testing.assert_close(
+            reloaded_logits, reference_logits, atol=0.001, rtol=0.001
+        )
+        reload_delta = float((reloaded_logits - reference_logits).abs().max())
+        accelerator.print(f"reload verification passed max_logit_delta={reload_delta:.6f}")
+        del reloaded
 
 
 if __name__ == "__main__":

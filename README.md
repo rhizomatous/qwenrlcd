@@ -70,3 +70,13 @@ source .venv/bin/activate
 uv pip install -e ".[dev]"
 pytest
 ```
+
+## Inference
+
+A saved run contains the tokenizer, LoRA adapter, decision head, and training configuration. It can be used like so:
+
+```bash
+qwenrlcd-predict --run-dir outputs/qwen3-1.7b-parallel-smoke --input data/smoke_inference.jsonl --output predictions.jsonl
+```
+
+The output is keyed by bundle and question IDs.

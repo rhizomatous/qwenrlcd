@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from qwenrlcd.data import DecisionDataset, build_tree_attention_pattern, read_jsonl, write_jsonl
 from qwenrlcd.schema import DecisionBundle
 from qwenrlcd.synthetic import generate_bundles
@@ -105,3 +107,37 @@ def test_bundle_and_singleton_have_identical_branch_inputs() -> None:
         assert bundled["position_ids"][bundled_start:bundled_end] == singleton[
             "position_ids"
         ][single_start:single_end]
+
+
+def test_dataset_requires_targets_only_in_training_mode() -> None:
+    value = example_dict()
+    for question in value["questions"].values():
+        question.pop("target")
+    bundle = DecisionBundle.from_dict(value)
+    tokenizer = WhitespaceTokenizer()
+
+    training_dataset = DecisionDataset(
+        [bundle],
+        tokenizer,
+        max_length=512,
+        max_choices=255,
+        max_questions=16,
+        shuffle=False,
+        seed=1,
+    )
+    with pytest.raises(ValueError, match="has no training target"):
+        training_dataset[0]
+
+    inference_dataset = DecisionDataset(
+        [bundle],
+        tokenizer,
+        max_length=512,
+        max_choices=255,
+        max_questions=16,
+        shuffle=False,
+        seed=1,
+        require_targets=False,
+    )
+    assert inference_dataset[0]["targets"] == [
+        [0.0] * len(question.options) for question in bundle.questions
+    ]

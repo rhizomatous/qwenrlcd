@@ -71,6 +71,7 @@ class DecisionDataset(Sequence[dict[str, Any]]):
         max_questions: int,
         shuffle: bool,
         seed: int,
+        require_targets: bool = True,
     ) -> None:
         self.bundles = list(bundles)
         self.tokenizer = tokenizer
@@ -79,6 +80,7 @@ class DecisionDataset(Sequence[dict[str, Any]]):
         self.max_questions = max_questions
         self.shuffle = shuffle
         self.seed = seed
+        self.require_targets = require_targets
         self.epoch = 0
 
     def __len__(self) -> int:
@@ -107,6 +109,8 @@ class DecisionDataset(Sequence[dict[str, Any]]):
                     f"question {question.id} has {len(question.options)} choices, "
                     f"above configured maximum {self.max_choices}"
                 )
+            if self.require_targets and question.target is None:
+                raise ValueError(f"question {question.id} has no training target")
 
         state_ids = self._encode(render_state(bundle))
         branch_ids = [self._encode(render_question(question)) for question in bundle.questions]
@@ -144,7 +148,12 @@ class DecisionDataset(Sequence[dict[str, Any]]):
             "branch_spans": branch_spans,
             "decision_indices": decision_indices,
             "num_choices": [len(question.options) for question in bundle.questions],
-            "targets": [question.target_vector() for question in bundle.questions],
+            "targets": [
+                question.target_vector()
+                if question.target is not None
+                else [0.0] * len(question.options)
+                for question in bundle.questions
+            ],
         }
 
 
