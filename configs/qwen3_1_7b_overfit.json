@@ -9,6 +9,7 @@
   "max_choices": 255,
   "epochs": 50,
   "validation_every_epochs": 5,
+  "permute_training": false,
   "micro_batch_size": 1,
   "gradient_accumulation_steps": 1,
   "learning_rate": 0.0005,

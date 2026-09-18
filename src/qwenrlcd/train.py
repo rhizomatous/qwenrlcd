@@ -56,7 +56,7 @@ def main() -> None:
         max_length=int(config["max_length"]),
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
-        shuffle=True,
+        shuffle=bool(config.get("permute_training", True)),
         seed=seed,
     )
     validation_dataset = DecisionDataset(
