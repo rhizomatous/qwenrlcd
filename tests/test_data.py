@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from qwenrlcd.data import DecisionDataset, build_tree_attention_pattern, read_jsonl, write_jsonl
@@ -39,6 +41,20 @@ def test_synthetic_bundle_contains_all_question_types() -> None:
         "noul",
         "score",
     }
+
+
+def test_overfit_fixture_has_two_hard_labeled_bundles() -> None:
+    path = Path(__file__).parents[1] / "data" / "overfit.jsonl"
+    bundles = read_jsonl(path)
+
+    assert len(bundles) == 2
+    assert all(
+        question.target is not None
+        and max(question.target.values()) == 1.0
+        and sum(question.target.values()) == 1.0
+        for bundle in bundles
+        for question in bundle.questions
+    )
 
 
 def test_tree_attention_isolates_branches() -> None:

@@ -143,6 +143,9 @@ def main() -> None:
 
     global_step = 0
     validation_history: list[dict[str, float | int]] = []
+    validation_every_epochs = int(config.get("validation_every_epochs", 1))
+    if validation_every_epochs < 1:
+        raise ValueError("validation_every_epochs must be at least one")
     model.train()
     for epoch in range(int(config["epochs"])):
         train_dataset.set_epoch(epoch)
@@ -182,6 +185,10 @@ def main() -> None:
                     )
                 if global_step % int(config["save_every"]) == 0:
                     accelerator.save_state(output_dir / f"checkpoint-{global_step}")
+
+        is_final_epoch = epoch + 1 == int(config["epochs"])
+        if (epoch + 1) % validation_every_epochs != 0 and not is_final_epoch:
+            continue
 
         model.eval()
         validation_losses: list[float] = []

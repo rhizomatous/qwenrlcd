@@ -11,11 +11,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Verify packed questions match isolated Qwen evaluations"
     )
-    parser.add_argument("--config", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--config", type=Path)
+    source.add_argument("--run-dir", type=Path)
     parser.add_argument("--atol", type=float, default=0.0001)
     parser.add_argument("--rtol", type=float, default=0.0001)
     args = parser.parse_args()
-    config = load_config(args.config)
+    config_path = (
+        args.config if args.config is not None else args.run_dir / "training_config.json"
+    )
+    config = load_config(config_path)
 
     import torch
     from transformers import AutoTokenizer
@@ -39,21 +44,30 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    model = DecisionModel.from_pretrained(
-        config["model_id"],
-        max_choices=int(config["max_choices"]),
-        dtype=torch.float32,
-        trust_remote_code=bool(config.get("trust_remote_code", True)),
-        attn_implementation=config.get("attn_implementation", "eager"),
-    )
-    lora = config.get("lora", {})
-    if lora.get("enabled", True):
-        model.attach_lora(
-            rank=int(lora["rank"]),
-            alpha=int(lora["alpha"]),
-            dropout=float(lora["dropout"]),
-            target_modules=lora["target_modules"],
+    if args.run_dir is not None:
+        model = DecisionModel.load_components(
+            args.run_dir / "final",
+            model_id=config["model_id"],
+            dtype=torch.float32,
+            trust_remote_code=bool(config.get("trust_remote_code", True)),
+            attn_implementation=config.get("attn_implementation", "eager"),
         )
+    else:
+        model = DecisionModel.from_pretrained(
+            config["model_id"],
+            max_choices=int(config["max_choices"]),
+            dtype=torch.float32,
+            trust_remote_code=bool(config.get("trust_remote_code", True)),
+            attn_implementation=config.get("attn_implementation", "eager"),
+        )
+        lora = config.get("lora", {})
+        if lora.get("enabled", True):
+            model.attach_lora(
+                rank=int(lora["rank"]),
+                alpha=int(lora["alpha"]),
+                dropout=float(lora["dropout"]),
+                target_modules=lora["target_modules"],
+            )
     model = model.cuda()
     model.eval()
 
