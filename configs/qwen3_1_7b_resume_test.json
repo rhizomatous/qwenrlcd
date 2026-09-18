@@ -1,0 +1,42 @@
+{
+  "model_id": "Qwen/Qwen3-1.7B-Base",
+  "train_file": "data/overfit.jsonl",
+  "validation_file": "data/overfit.jsonl",
+  "output_dir": "outputs/qwen3-1.7b-resume-test",
+  "seed": 17,
+  "max_length": 2048,
+  "max_questions": 32,
+  "max_choices": 255,
+  "epochs": 10,
+  "validation_every_epochs": 5,
+  "permute_training": false,
+  "micro_batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 0.0005,
+  "head_learning_rate": 0.005,
+  "weight_decay": 0.0,
+  "warmup_ratio": 0.05,
+  "max_grad_norm": 1.0,
+  "ce_weight": 1.0,
+  "brier_weight": 0.25,
+  "log_every": 1,
+  "save_every": 5,
+  "gradient_checkpointing": false,
+  "trust_remote_code": true,
+  "attn_implementation": "eager",
+  "lora": {
+    "enabled": true,
+    "rank": 32,
+    "alpha": 64,
+    "dropout": 0.0,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  }
+}

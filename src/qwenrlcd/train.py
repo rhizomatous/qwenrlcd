@@ -16,15 +16,30 @@ def load_config(path: str | Path) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a parallel calibrated decision model")
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--output-dir", type=Path, help="Override config output_dir")
+    parser.add_argument(
+        "--resume-from",
+        help="Accelerate checkpoint directory, or 'latest' below output_dir",
+    )
+    parser.add_argument(
+        "--stop-after-step",
+        type=int,
+        help="Save a checkpoint and exit after this optimizer step (for resume testing)",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
 
     import torch
-    from accelerate import Accelerator
+    from accelerate import Accelerator, DataLoaderConfiguration
     from torch.optim import AdamW
     from torch.utils.data import DataLoader
     from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
+    from .checkpointing import (
+        TrainerProgress,
+        load_trainer_progress,
+        resolve_resume_checkpoint,
+    )
     from .data import DecisionCollator, DecisionDataset, read_jsonl
     from .losses import decision_loss
     from .metrics import calibration_metrics
@@ -37,6 +52,10 @@ def main() -> None:
     accelerator = Accelerator(
         gradient_accumulation_steps=int(config["gradient_accumulation_steps"]),
         mixed_precision="bf16",
+        dataloader_config=DataLoaderConfiguration(
+            use_seedable_sampler=True,
+            data_seed=seed,
+        ),
     )
     tokenizer = AutoTokenizer.from_pretrained(
         config["model_id"], trust_remote_code=bool(config.get("trust_remote_code", True))
@@ -121,6 +140,8 @@ def main() -> None:
         len(train_dataloader) / int(config["gradient_accumulation_steps"])
     )
     total_steps = update_steps_per_epoch * int(config["epochs"])
+    if args.stop_after_step is not None and not 1 <= args.stop_after_step <= total_steps:
+        raise ValueError(f"stop-after-step must be between 1 and {total_steps}")
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=max(1, int(total_steps * float(config["warmup_ratio"]))),
@@ -132,24 +153,95 @@ def main() -> None:
         )
     )
 
-    output_dir = Path(config["output_dir"])
+    output_dir = args.output_dir or Path(config["output_dir"])
     if accelerator.is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
         tokenizer.save_pretrained(output_dir / "tokenizer")
+        saved_config = {**config, "output_dir": str(output_dir)}
         (output_dir / "training_config.json").write_text(
-            json.dumps(config, indent=2) + "\n", encoding="utf-8"
+            json.dumps(saved_config, indent=2) + "\n", encoding="utf-8"
         )
     accelerator.wait_for_everyone()
 
+    start_epoch = 0
+    resume_batch = 0
     global_step = 0
+    resume_checkpoint: Path | None = None
+    if args.resume_from is not None:
+        resume_checkpoint = resolve_resume_checkpoint(args.resume_from, output_dir)
+        progress = load_trainer_progress(resume_checkpoint)
+        if progress.batches_per_epoch != len(train_dataloader):
+            raise ValueError(
+                "checkpoint batches_per_epoch does not match the current dataloader: "
+                f"{progress.batches_per_epoch} != {len(train_dataloader)}"
+            )
+        gradient_accumulation_steps = int(config["gradient_accumulation_steps"])
+        if progress.gradient_accumulation_steps != gradient_accumulation_steps:
+            raise ValueError(
+                "checkpoint gradient accumulation does not match the config: "
+                f"{progress.gradient_accumulation_steps} != "
+                f"{gradient_accumulation_steps}"
+            )
+        if progress.global_step >= total_steps:
+            raise ValueError(
+                f"checkpoint step {progress.global_step} already reached total_steps={total_steps}"
+            )
+        accelerator.load_state(resume_checkpoint)
+        start_epoch = progress.epoch
+        resume_batch = progress.next_batch
+        global_step = progress.global_step
+        accelerator.print(
+            f"resumed checkpoint={resume_checkpoint} epoch={start_epoch} "
+            f"next_batch={resume_batch} step={global_step}/{total_steps}"
+        )
+
     validation_history: list[dict[str, float | int]] = []
+    metrics_path = output_dir / "validation_metrics.json"
+    if resume_checkpoint is not None and metrics_path.is_file():
+        with metrics_path.open(encoding="utf-8") as handle:
+            saved_history = json.load(handle)
+        validation_history = [
+            metrics for metrics in saved_history if int(metrics["step"]) <= global_step
+        ]
     validation_every_epochs = int(config.get("validation_every_epochs", 1))
     if validation_every_epochs < 1:
         raise ValueError("validation_every_epochs must be at least one")
+    save_every = int(config["save_every"])
+    if save_every < 1:
+        raise ValueError("save_every must be at least one")
+
+    def save_checkpoint(epoch: int, next_batch: int) -> None:
+        next_epoch = epoch
+        if next_batch >= len(train_dataloader):
+            next_epoch += 1
+            next_batch = 0
+        checkpoint_dir = output_dir / f"checkpoint-{global_step}"
+        accelerator.save_state(checkpoint_dir)
+        if accelerator.is_main_process:
+            TrainerProgress(
+                epoch=next_epoch,
+                next_batch=next_batch,
+                global_step=global_step,
+                batches_per_epoch=len(train_dataloader),
+                gradient_accumulation_steps=int(
+                    config["gradient_accumulation_steps"]
+                ),
+            ).write(checkpoint_dir)
+        accelerator.wait_for_everyone()
+
     model.train()
-    for epoch in range(int(config["epochs"])):
+    for epoch in range(start_epoch, int(config["epochs"])):
         train_dataset.set_epoch(epoch)
-        for batch in train_dataloader:
+        if hasattr(train_dataloader, "set_epoch"):
+            train_dataloader.set_epoch(epoch)
+        skipped_batches = resume_batch if epoch == start_epoch else 0
+        active_dataloader = (
+            accelerator.skip_first_batches(train_dataloader, skipped_batches)
+            if skipped_batches
+            else train_dataloader
+        )
+        for relative_batch_index, batch in enumerate(active_dataloader):
+            batch_index = relative_batch_index + skipped_batches
             with accelerator.accumulate(model):
                 logits = model(
                     input_ids=batch["input_ids"],
@@ -183,8 +275,20 @@ def main() -> None:
                         f"ce={losses.cross_entropy.item():.4f} "
                         f"brier={losses.brier.item():.4f}"
                     )
-                if global_step % int(config["save_every"]) == 0:
-                    accelerator.save_state(output_dir / f"checkpoint-{global_step}")
+                should_stop = (
+                    args.stop_after_step is not None
+                    and global_step >= args.stop_after_step
+                )
+                if global_step % save_every == 0 or should_stop:
+                    save_checkpoint(epoch, batch_index + 1)
+                if should_stop:
+                    accelerator.print(
+                        f"stopped after step={global_step}; resume with "
+                        f"--resume-from {output_dir / f'checkpoint-{global_step}'}"
+                    )
+                    return
+
+        resume_batch = 0
 
         is_final_epoch = epoch + 1 == int(config["epochs"])
         if (epoch + 1) % validation_every_epochs != 0 and not is_final_epoch:
@@ -238,6 +342,10 @@ def main() -> None:
             "ece": calibration.expected_calibration_error,
         }
         validation_history.append(epoch_metrics)
+        if accelerator.is_main_process:
+            metrics_path.write_text(
+                json.dumps(validation_history, indent=2) + "\n", encoding="utf-8"
+            )
         accelerator.print(
             "validation "
             + " ".join(
@@ -263,7 +371,7 @@ def main() -> None:
             ).float()
 
         unwrapped.save_components(output_dir / "final")
-        (output_dir / "validation_metrics.json").write_text(
+        metrics_path.write_text(
             json.dumps(validation_history, indent=2) + "\n", encoding="utf-8"
         )
         accelerator.print(f"saved final model components to {output_dir / 'final'}")
