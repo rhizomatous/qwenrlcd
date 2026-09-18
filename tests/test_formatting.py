@@ -23,3 +23,18 @@ def test_question_id_is_not_model_input() -> None:
     question = DecisionBundle.from_dict(value).questions[0]
 
     assert "private_route_key" not in render_question(question)
+
+
+def test_noul_omits_absent_criteria_but_renders_explicit_criteria() -> None:
+    value = example_dict()
+    bare = DecisionBundle.from_dict(value).questions[1]
+    assert "<|decision_criteria|>" not in render_question(bare)
+
+    value["questions"]["urgent"]["criteria"] = {
+        "false": "No immediate action is needed",
+        "true": "Immediate action is needed",
+    }
+    explicit = DecisionBundle.from_dict(value).questions[1]
+    rendered = render_question(explicit)
+    assert "<|decision_criteria|>" in rendered
+    assert "[1] true: Immediate action is needed" in rendered

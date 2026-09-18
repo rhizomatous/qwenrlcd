@@ -24,11 +24,16 @@ def render_question(question: Question) -> str:
         "<|decision_question|>",
         f"type: {question.type.value}",
         f"instructions: {render_jsonlike(question.instructions)}",
-        "<|decision_criteria|>",
     ]
-    for index, option in enumerate(question.options):
-        description = render_jsonlike(option.description)
-        lines.append(f"[{index}] {option.key}: {description}")
+    has_criteria = not (
+        question.type.value == "noul"
+        and all(option.description is None for option in question.options)
+    )
+    if has_criteria:
+        lines.append("<|decision_criteria|>")
+        for index, option in enumerate(question.options):
+            description = render_jsonlike(option.description)
+            lines.append(f"[{index}] {option.key}: {description}")
     lines.append(DECISION_MARKER)
     return "\n".join(lines)
 

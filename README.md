@@ -58,6 +58,8 @@ Each line is one shared state with a map of labeled questions:
 ```
 
 Question IDs are response-routing keys and are deliberately excluded from model input.
+Noul `criteria` is optional, matching the System One API. When omitted, the model sees
+only the question type and instructions; the false/true output ordering remains fixed.
 
 ## Tests
 

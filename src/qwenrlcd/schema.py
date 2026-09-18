@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import math
 import random
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 MAX_CHOICES = 255
 MAX_QUESTIONS = 64
@@ -93,8 +94,8 @@ class Question:
                 raise ValueError("noul criteria must be an optional true/false map")
             criteria = criteria or {}
             options = (
-                Option("false", criteria.get("false", "The statement is false")),
-                Option("true", criteria.get("true", "The statement is true")),
+                Option("false", criteria.get("false")),
+                Option("true", criteria.get("true")),
             )
 
         raw_target = value.get("target")
@@ -126,7 +127,10 @@ class Question:
         elif self.type is QuestionType.SCORE:
             value["criteria"] = [option.description for option in self.options]
         else:
-            value["criteria"] = {option.key: option.description for option in self.options}
+            if any(option.description is not None for option in self.options):
+                value["criteria"] = {
+                    option.key: option.description for option in self.options
+                }
         if self.target is not None:
             value["target"] = dict(self.target)
         return value

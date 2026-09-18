@@ -45,6 +45,7 @@ def test_bundle_parses_mixed_questions_and_round_trips() -> None:
         QuestionType.SCORE,
     ]
     assert bundle.questions[0].target_vector() == [0.75, 0.25]
+    assert [option.description for option in bundle.questions[1].options] == [None, None]
     assert bundle.questions[2].expected_score() == pytest.approx(1.4)
     assert DecisionBundle.from_dict(bundle.to_dict()) == bundle
 
