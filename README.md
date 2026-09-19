@@ -61,6 +61,21 @@ Question IDs are response-routing keys and are deliberately excluded from model 
 Noul `criteria` is optional, matching the System One API. When omitted, the model sees
 only the question type and instructions; the false/true output ordering remains fixed.
 
+## Training data and metrics
+
+The trainer accepts the JSONL fixtures via `train_file` and `validation_file`, or a
+standard Hugging Face dataset via `dataset_path` and `dataset_config` (for example,
+`"dataset_path": "../qwenrlcd-data", "dataset_config": "core"`). A Hub dataset ID
+can replace the local path. The dataset adapter reads decisions and their source
+label; source provenance details are not model inputs.
+
+Loss is averaged over questions **within each bundle**, then over bundles. Validation
+reports bundle-macro and source-macro metrics alongside source, question-type,
+choice-count, question-count, and target-entropy slices. `accuracy` is argmax-label
+agreement; `expected_accuracy` and ECE use the probability assigned by the target
+distribution to the model's predicted class. NLL, Brier, target entropy, KL, and JS
+divergence retain the full soft target.
+
 ## Tests
 
 The test suite covers schema validation, soft targets, formatting, tree-attention isolation, logical position reset, deterministic fixture generation, and calibration

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from .formatting import render_question, render_state
 from .schema import DecisionBundle
@@ -73,7 +74,7 @@ class DecisionDataset(Sequence[dict[str, Any]]):
         seed: int,
         require_targets: bool = True,
     ) -> None:
-        self.bundles = list(bundles)
+        self.bundles = bundles
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.max_choices = max_choices
@@ -141,7 +142,9 @@ class DecisionDataset(Sequence[dict[str, Any]]):
 
         return {
             "id": bundle.id,
+            "source": bundle.source or "unspecified",
             "question_ids": [question.id for question in bundle.questions],
+            "question_types": [question.type.value for question in bundle.questions],
             "input_ids": input_ids,
             "position_ids": position_ids,
             "state_length": len(state_ids),
@@ -188,6 +191,7 @@ class DecisionCollator:
             (batch_size, self.max_questions, self.max_choices), dtype=torch.float32
         )
         question_ids: list[list[str | None]] = []
+        question_types: list[list[str | None]] = []
 
         for row, example in enumerate(examples):
             sequence_length = len(example["input_ids"])
@@ -215,10 +219,14 @@ class DecisionCollator:
 
             ids = list(example["question_ids"])
             question_ids.append(ids + [None] * (self.max_questions - len(ids)))
+            types = list(example["question_types"])
+            question_types.append(types + [None] * (self.max_questions - len(types)))
 
         return {
             "ids": [example["id"] for example in examples],
+            "sources": [example["source"] for example in examples],
             "question_ids": question_ids,
+            "question_types": question_types,
             "input_ids": input_ids,
             "position_ids": position_ids,
             "tree_attention_mask": tree_attention_mask,

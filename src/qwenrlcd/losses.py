@@ -12,6 +12,7 @@ class DecisionLoss:
     cross_entropy: torch.Tensor
     brier: torch.Tensor
     probabilities: torch.Tensor
+    per_bundle_total: torch.Tensor
 
 
 def mask_invalid_choices(logits: torch.Tensor, num_choices: torch.Tensor) -> torch.Tensor:
@@ -36,10 +37,18 @@ def decision_loss(
     probabilities = log_probabilities.exp()
 
     valid = question_mask.float()
-    denominator = valid.sum().clamp_min(1.0)
+    questions_per_bundle = valid.sum(dim=-1)
+    if torch.any(questions_per_bundle == 0):
+        raise ValueError("every bundle must contain at least one valid question")
     per_question_ce = -(targets * log_probabilities).sum(dim=-1)
     per_question_brier = ((probabilities - targets) ** 2).sum(dim=-1)
-    cross_entropy = (per_question_ce * valid).sum() / denominator
-    brier = (per_question_brier * valid).sum() / denominator
-    total = ce_weight * cross_entropy + brier_weight * brier
-    return DecisionLoss(total, cross_entropy, brier, probabilities)
+    per_bundle_ce = (per_question_ce * valid).sum(dim=-1) / questions_per_bundle
+    per_bundle_brier = (per_question_brier * valid).sum(dim=-1) / questions_per_bundle
+    per_bundle_total = ce_weight * per_bundle_ce + brier_weight * per_bundle_brier
+    return DecisionLoss(
+        per_bundle_total.mean(),
+        per_bundle_ce.mean(),
+        per_bundle_brier.mean(),
+        probabilities,
+        per_bundle_total,
+    )

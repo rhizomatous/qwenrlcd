@@ -41,8 +41,9 @@ def main() -> None:
         resolve_resume_checkpoint,
     )
     from .data import DecisionCollator, DecisionDataset, read_jsonl
+    from .hf_data import load_hf_bundles
     from .losses import decision_loss
-    from .metrics import calibration_metrics
+    from .metrics import summarize_validation
     from .model import DecisionModel
 
     seed = int(config["seed"])
@@ -69,8 +70,20 @@ def main() -> None:
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
     )
+    if "dataset_path" in config:
+        if "train_file" in config or "validation_file" in config:
+            raise ValueError("configure either dataset_path or JSONL files, not both")
+        dataset_config = str(config.get("dataset_config", "core"))
+        train_bundles = load_hf_bundles(config["dataset_path"], dataset_config, "train")
+        validation_bundles = load_hf_bundles(
+            config["dataset_path"], dataset_config, "validation"
+        )
+    else:
+        train_bundles = read_jsonl(config["train_file"])
+        validation_bundles = read_jsonl(config["validation_file"])
+
     train_dataset = DecisionDataset(
-        read_jsonl(config["train_file"]),
+        train_bundles,
         tokenizer,
         max_length=int(config["max_length"]),
         max_choices=int(config["max_choices"]),
@@ -79,7 +92,7 @@ def main() -> None:
         seed=seed,
     )
     validation_dataset = DecisionDataset(
-        read_jsonl(config["validation_file"]),
+        validation_bundles,
         tokenizer,
         max_length=int(config["max_length"]),
         max_choices=int(config["max_choices"]),
@@ -195,7 +208,7 @@ def main() -> None:
             f"next_batch={resume_batch} step={global_step}/{total_steps}"
         )
 
-    validation_history: list[dict[str, float | int]] = []
+    validation_history: list[dict[str, Any]] = []
     metrics_path = output_dir / "validation_metrics.json"
     if resume_checkpoint is not None and metrics_path.is_file():
         with metrics_path.open(encoding="utf-8") as handle:
@@ -295,9 +308,7 @@ def main() -> None:
             continue
 
         model.eval()
-        validation_losses: list[float] = []
-        validation_probabilities: list[list[float]] = []
-        validation_targets: list[list[float]] = []
+        local_validation: list[dict[str, Any]] = []
         with torch.no_grad():
             for batch in validation_dataloader:
                 logits = model(
@@ -314,32 +325,73 @@ def main() -> None:
                     ce_weight=float(config["ce_weight"]),
                     brier_weight=float(config["brier_weight"]),
                 )
-                gathered_loss, probabilities, targets, question_mask = (
-                    accelerator.gather_for_metrics(
-                        (
-                            losses.total.detach().repeat(logits.shape[0]),
-                            losses.probabilities,
-                            batch["targets"],
-                            batch["question_mask"],
+                probabilities = losses.probabilities.detach().float().cpu()
+                targets = batch["targets"].float().cpu()
+                question_mask = batch["question_mask"].cpu()
+                num_choices = batch["num_choices"].cpu()
+                bundle_losses = losses.per_bundle_total.detach().float().cpu()
+                for row, bundle_id in enumerate(batch["ids"]):
+                    questions = []
+                    for index, valid in enumerate(question_mask[row].tolist()):
+                        if not valid:
+                            continue
+                        choice_count = int(num_choices[row, index])
+                        questions.append(
+                            {
+                                "type": batch["question_types"][row][index],
+                                "probabilities": probabilities[
+                                    row, index, :choice_count
+                                ].tolist(),
+                                "target": targets[row, index, :choice_count].tolist(),
+                            }
                         )
+                    local_validation.append(
+                        {
+                            "id": bundle_id,
+                            "source": batch["sources"][row],
+                            "loss": float(bundle_losses[row]),
+                            "questions": questions,
+                        }
                     )
-                )
-                validation_losses.extend(gathered_loss.float().cpu().tolist())
-                probabilities = probabilities.float().cpu()
-                targets = targets.float().cpu()
-                question_mask = question_mask.cpu()
-                validation_probabilities.extend(probabilities[question_mask].tolist())
-                validation_targets.extend(targets[question_mask].tolist())
 
-        calibration = calibration_metrics(validation_probabilities, validation_targets)
-        epoch_metrics: dict[str, float | int] = {
+        if accelerator.num_processes > 1:
+            gathered: list[list[dict[str, Any]] | None] = [
+                None for _ in range(accelerator.num_processes)
+            ]
+            torch.distributed.all_gather_object(gathered, local_validation)
+            all_validation = [bundle for rank_bundles in gathered
+                              for bundle in (rank_bundles or [])]
+        else:
+            all_validation = local_validation
+        # Accelerate can pad the last distributed batch by repeating examples.
+        unique_validation = {bundle["id"]: bundle for bundle in all_validation}
+        if len(unique_validation) != len(validation_dataset):
+            raise ValueError(
+                "validation bundle IDs are missing or duplicated: "
+                f"{len(unique_validation)} unique for {len(validation_dataset)} rows"
+            )
+        summary = summarize_validation(list(unique_validation.values()))
+        epoch_metrics: dict[str, Any] = {
             "epoch": epoch,
             "step": global_step,
-            "loss": sum(validation_losses) / len(validation_losses),
-            "accuracy": calibration.accuracy,
-            "brier": calibration.brier,
-            "nll": calibration.negative_log_likelihood,
-            "ece": calibration.expected_calibration_error,
+            "loss": summary["loss"],
+            "accuracy": summary["accuracy"],
+            "expected_accuracy": summary["expected_accuracy"],
+            "brier": summary["brier"],
+            "nll": summary["negative_log_likelihood"],
+            "ece": summary["expected_calibration_error"],
+            "target_entropy": summary["target_entropy"],
+            "kl": summary["kl_divergence"],
+            "js": summary["js_divergence"],
+            "bundles": summary["bundles"],
+            "questions": summary["count"],
+            "slices": {
+                key: value for key, value in summary.items()
+                if key in {
+                    "bundle_macro", "source_macro", "by_source", "by_type",
+                    "by_choice_count", "by_question_count", "by_target_entropy",
+                }
+            },
         }
         validation_history.append(epoch_metrics)
         if accelerator.is_main_process:
@@ -349,8 +401,10 @@ def main() -> None:
         accelerator.print(
             "validation "
             + " ".join(
-                f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
-                for key, value in epoch_metrics.items()
+                f"{key}={epoch_metrics[key]:.4f}"
+                if isinstance(epoch_metrics[key], float)
+                else f"{key}={epoch_metrics[key]}"
+                for key in ("epoch", "step", "loss", "accuracy", "brier", "nll", "ece")
             )
         )
         model.train()

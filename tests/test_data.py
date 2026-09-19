@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,21 @@ def test_dataset_resets_logical_positions_for_each_question() -> None:
         assert example["position_ids"][start] == state_length
         assert example["position_ids"][end - 1] == state_length + (end - start) - 1
     assert example["decision_indices"] == [end - 1 for _, end in example["branch_spans"]]
+
+
+def test_dataset_keeps_only_source_and_question_type_for_slices() -> None:
+    value = example_dict()
+    value["source"] = "fixture_source"
+    bundle = DecisionBundle.from_dict(value)
+    dataset = DecisionDataset(
+        [bundle], WhitespaceTokenizer(),
+        max_length=512, max_choices=255, max_questions=16,
+        shuffle=True, seed=7,
+    )
+    example = dataset[0]
+    assert example["source"] == "fixture_source"
+    assert set(example["question_types"]) == {"choice", "noul", "score"}
+    assert bundle.permuted(random.Random(7)).source == "fixture_source"
 
 
 def test_bundle_and_singleton_have_identical_branch_inputs() -> None:

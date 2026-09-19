@@ -158,10 +158,15 @@ class DecisionBundle:
     id: str
     state: Any
     questions: tuple[Question, ...]
+    source: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
             raise ValueError("bundle id must be a non-empty string")
+        if self.source is not None and (
+            not isinstance(self.source, str) or not self.source.strip()
+        ):
+            raise ValueError("bundle source must be a non-empty string when provided")
         _require_jsonlike(self.state, "state")
         if not 1 <= len(self.questions) <= MAX_QUESTIONS:
             raise ValueError(f"bundles require 1 to {MAX_QUESTIONS} questions")
@@ -181,16 +186,20 @@ class DecisionBundle:
                 Question.from_entry(str(question_id), question)
                 for question_id, question in questions.items()
             ),
+            source=value.get("source"),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "state": self.state,
             "questions": {question.id: question.to_entry() for question in self.questions},
         }
+        if self.source is not None:
+            result["source"] = self.source
+        return result
 
     def permuted(self, rng: random.Random) -> DecisionBundle:
         questions = [question.permuted_options(rng) for question in self.questions]
         rng.shuffle(questions)
-        return DecisionBundle(self.id, self.state, tuple(questions))
+        return DecisionBundle(self.id, self.state, tuple(questions), self.source)
