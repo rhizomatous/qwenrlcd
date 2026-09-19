@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from qwenrlcd.data import DecisionDataset, build_tree_attention_pattern, read_jsonl, write_jsonl
+from qwenrlcd.data import (
+    DecisionDataset,
+    build_tree_attention_pattern,
+    read_jsonl,
+    training_view_bundle,
+    write_jsonl,
+)
 from qwenrlcd.schema import DecisionBundle
 from qwenrlcd.synthetic import generate_bundles
 
@@ -107,6 +113,27 @@ def test_dataset_keeps_only_source_and_question_type_for_slices() -> None:
     assert example["source"] == "fixture_source"
     assert set(example["question_types"]) == {"choice", "noul", "score"}
     assert bundle.permuted(random.Random(7)).source == "fixture_source"
+
+
+def test_training_view_recreates_dataset_permutation_and_packed_inputs() -> None:
+    first = DecisionBundle.from_dict(example_dict())
+    second_value = example_dict()
+    second_value["id"] = "second"
+    second = DecisionBundle.from_dict(second_value)
+    bundles = [first, second]
+    tokenizer = WhitespaceTokenizer()
+    training = DecisionDataset(
+        bundles, tokenizer, max_length=512, max_choices=255, max_questions=16,
+        shuffle=True, seed=17,
+    )
+    training.set_epoch(3)
+    for index in range(len(bundles)):
+        exact_view = training_view_bundle(bundles, index, epoch=3, seed=17)
+        unshuffled = DecisionDataset(
+            [exact_view], tokenizer, max_length=512, max_choices=255,
+            max_questions=16, shuffle=False, seed=17,
+        )
+        assert training[index] == unshuffled[0]
 
 
 def test_bundle_and_singleton_have_identical_branch_inputs() -> None:

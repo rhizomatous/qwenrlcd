@@ -78,6 +78,9 @@ model; the pilot config also forbids state truncation during training.
 bundles for a controlled training run. `qwenrlcd-diagnose-choice --run-dir
 outputs/qwen3-1.7b-core-pilot-v0` reloads a saved model and reports Choice metrics
 by source and option count against a uniform baseline, with example predictions.
+For a run trained with option permutation, add `--split train
+--training-epoch-view 3` to evaluate the exact packed inputs seen in epoch 3
+instead of the canonical train order. Epoch numbers are zero-based.
 
 Loss is averaged over questions **within each bundle**, then over bundles. Validation
 reports bundle-macro and source-macro metrics alongside source, question-type,

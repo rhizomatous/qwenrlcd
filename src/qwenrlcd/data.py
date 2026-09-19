@@ -33,6 +33,14 @@ def write_jsonl(bundles: Iterable[DecisionBundle], path: str | Path) -> None:
             handle.write(json.dumps(bundle.to_dict(), ensure_ascii=False) + "\n")
 
 
+def training_view_bundle(
+    bundles: Sequence[DecisionBundle], index: int, *, epoch: int, seed: int
+) -> DecisionBundle:
+    """Recreate the exact question/option permutation used for a training row."""
+    rng = random.Random(seed + epoch * len(bundles) + index)
+    return bundles[index].permuted(rng)
+
+
 def build_tree_attention_pattern(
     sequence_length: int,
     state_length: int,
@@ -98,8 +106,9 @@ class DecisionDataset(Sequence[dict[str, Any]]):
     def __getitem__(self, index: int) -> dict[str, Any]:
         bundle = self.bundles[index]
         if self.shuffle:
-            rng = random.Random(self.seed + self.epoch * len(self.bundles) + index)
-            bundle = bundle.permuted(rng)
+            bundle = training_view_bundle(
+                self.bundles, index, epoch=self.epoch, seed=self.seed
+            )
 
         if len(bundle.questions) > self.max_questions:
             raise ValueError(

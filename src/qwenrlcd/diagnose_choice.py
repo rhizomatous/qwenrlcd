@@ -4,11 +4,33 @@ import argparse
 import json
 import math
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .data import training_view_bundle
+from .hf_data import select_question_type
 from .metrics import calibration_metrics
+from .schema import DecisionBundle, QuestionType
+
+
+def choice_diagnostic_bundles(
+    bundles: Sequence[DecisionBundle], *, training_epoch_view: int | None, seed: int
+) -> list[DecisionBundle]:
+    """Use short Choice-only inference, or the exact full packed training view."""
+    if training_epoch_view is None:
+        return select_question_type(bundles, QuestionType.CHOICE)
+    selected = []
+    for index in range(len(bundles)):
+        permuted = training_view_bundle(
+            bundles, index, epoch=training_epoch_view, seed=seed
+        )
+        if any(question.type is QuestionType.CHOICE for question in permuted.questions):
+            selected.append(permuted)
+    if not selected:
+        raise ValueError("no Choice questions in the selected training view")
+    return selected
 
 
 def _metric_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -108,24 +130,37 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--examples-per-source", type=int, default=2)
+    parser.add_argument(
+        "--training-epoch-view", type=int, metavar="EPOCH",
+        help="Recreate an exact zero-based training epoch, including all packed branches",
+    )
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error("batch-size must be positive")
+    if args.training_epoch_view is not None and args.split != "train":
+        parser.error("training-epoch-view requires --split train")
+
+    from .train import load_config
+
+    config = load_config(args.run_dir / "training_config.json")
+    if args.training_epoch_view is not None:
+        if not bool(config.get("permute_training", True)):
+            parser.error("this run did not permute its training questions")
+        if not 0 <= args.training_epoch_view < int(config["epochs"]):
+            parser.error(f"training epoch must be between 0 and {int(config['epochs']) - 1}")
 
     import torch
     from torch.utils.data import DataLoader
     from transformers import AutoTokenizer
 
     from .data import DecisionCollator, DecisionDataset
-    from .hf_data import load_configured_bundles, select_question_type
+    from .hf_data import load_configured_bundles
     from .losses import mask_invalid_choices
     from .model import DecisionModel
-    from .schema import QuestionType
-    from .train import load_config
-
-    config = load_config(args.run_dir / "training_config.json")
-    bundles = select_question_type(
-        load_configured_bundles(config, args.split), QuestionType.CHOICE
+    bundles = choice_diagnostic_bundles(
+        load_configured_bundles(config, args.split),
+        training_epoch_view=args.training_epoch_view,
+        seed=int(config["seed"]),
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = (
@@ -187,6 +222,8 @@ def main() -> None:
             batch_bundles = bundles[bundle_offset : bundle_offset + len(batch["ids"])]
             for batch_index, bundle in enumerate(batch_bundles):
                 for question_index, question in enumerate(bundle.questions):
+                    if question.type is not QuestionType.CHOICE:
+                        continue
                     rows.append({
                         "source": bundle.source or "unspecified",
                         "bundle_id": bundle.id,
@@ -207,6 +244,11 @@ def main() -> None:
     report = summarize_choice_predictions(
         rows, examples_per_source=args.examples_per_source
     )
+    report["view"] = {
+        "split": args.split,
+        "training_epoch_view": args.training_epoch_view,
+        "contains_all_training_branches": args.training_epoch_view is not None,
+    }
     metrics_path = args.run_dir / "validation_metrics.json"
     if args.split == "validation" and metrics_path.is_file():
         with metrics_path.open(encoding="utf-8") as handle:
@@ -215,9 +257,14 @@ def main() -> None:
             name: report["overall"]["model"][name] - logged_choice[name]
             for name in ("accuracy", "brier", "kl_divergence")
         }
-    output = args.output or args.run_dir / f"choice_{args.split}_diagnostic.json"
+    view_name = (
+        f"train_epoch{args.training_epoch_view}"
+        if args.training_epoch_view is not None else args.split
+    )
+    output = args.output or args.run_dir / f"choice_{view_name}_diagnostic.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print("choice diagnostic view:", report["view"])
     for name, summary in (("overall", report["overall"]), *report["by_source"].items()):
         model_metrics = summary["model"]
         uniform = summary["uniform"]

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from qwenrlcd.diagnose_choice import summarize_choice_predictions
+from qwenrlcd.data import training_view_bundle
+from qwenrlcd.diagnose_choice import (
+    choice_diagnostic_bundles,
+    summarize_choice_predictions,
+)
+from qwenrlcd.schema import DecisionBundle
+
+from .test_schema import example_dict
 
 
 def _row(
@@ -52,3 +59,24 @@ def test_choice_diagnostic_rejects_misaligned_options() -> None:
     row["options"].pop()
     with pytest.raises(ValueError, match="must align"):
         summarize_choice_predictions([row])
+
+
+def test_training_epoch_view_keeps_exact_full_bundle_before_choice_selection() -> None:
+    first = DecisionBundle.from_dict(example_dict())
+    second_value = example_dict()
+    second_value["id"] = "second"
+    second_value["questions"].pop("route")
+    second = DecisionBundle.from_dict(second_value)
+    bundles = [first, second]
+
+    canonical = choice_diagnostic_bundles(
+        bundles, training_epoch_view=None, seed=17
+    )
+    assert len(canonical) == 1
+    assert [question.id for question in canonical[0].questions] == ["route"]
+
+    seen = choice_diagnostic_bundles(bundles, training_epoch_view=3, seed=17)
+    assert seen == [training_view_bundle(bundles, 0, epoch=3, seed=17)]
+    assert {question.id for question in seen[0].questions} == {
+        "route", "urgent", "severity"
+    }
