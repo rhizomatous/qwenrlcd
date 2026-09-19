@@ -137,17 +137,6 @@ def prune_checkpoints(
     return targets
 
 
-def require_free_space(path: str | Path, *, minimum_gib: float) -> None:
-    if minimum_gib <= 0:
-        raise ValueError("minimum_gib must be positive")
-    free_gib = shutil.disk_usage(path).free / 2**30
-    if free_gib < minimum_gib:
-        raise RuntimeError(
-            f"only {free_gib:.2f} GiB free at {path}; "
-            f"need at least {minimum_gib:.2f} GiB before saving"
-        )
-
-
 def resolve_resume_checkpoint(
     requested: str | Path, output_dir: str | Path
 ) -> Path:

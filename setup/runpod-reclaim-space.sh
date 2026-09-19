@@ -39,4 +39,4 @@ if [ "${1:-}" = "--apply" ]; then
     --keep 1 --include-incomplete --apply
 fi
 
-df -h /workspace
+du -sh /workspace

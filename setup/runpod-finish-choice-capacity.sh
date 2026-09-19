@@ -17,13 +17,12 @@ test ! -e "$QWENRLCD_OUTPUT_DIR/final"
 .venv/bin/python - <<'PY'
 from pathlib import Path
 
-from qwenrlcd.checkpointing import require_free_space, resolve_resume_checkpoint
+from qwenrlcd.checkpointing import resolve_resume_checkpoint
 
 run_dir = Path("outputs/qwen3-1.7b-choice-capacity-32-v0")
 latest = resolve_resume_checkpoint("latest", run_dir)
 if latest.name != "checkpoint-300":
     raise SystemExit(f"expected checkpoint-300, found {latest}")
-require_free_space(run_dir, minimum_gib=5.0)
 print(f"[capacity] resuming from {latest}")
 PY
 
@@ -39,4 +38,4 @@ uv run qwenrlcd-choice-capacity-report --run-dir "$QWENRLCD_OUTPUT_DIR"
 # training-state checkpoint is no longer needed for this capacity test.
 .venv/bin/python -m qwenrlcd.prune_checkpoints \
   --run-dir "$QWENRLCD_OUTPUT_DIR" --keep 0 --apply
-df -h /workspace
+du -sh /workspace

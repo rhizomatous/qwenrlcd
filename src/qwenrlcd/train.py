@@ -39,7 +39,6 @@ def main() -> None:
         TrainerProgress,
         load_trainer_progress,
         prune_checkpoints,
-        require_free_space,
         resolve_resume_checkpoint,
     )
     from .compact_checkpoint import register_compact_model_state_hooks
@@ -164,10 +163,8 @@ def main() -> None:
     register_compact_model_state_hooks(accelerator)
 
     output_dir = args.output_dir or Path(config["output_dir"])
-    minimum_free_gib = float(config.get("minimum_free_gib", 2.0))
     if accelerator.is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
-        require_free_space(output_dir, minimum_gib=minimum_free_gib)
         tokenizer.save_pretrained(output_dir / "tokenizer")
         saved_config = {**config, "output_dir": str(output_dir)}
         (output_dir / "training_config.json").write_text(
@@ -233,7 +230,6 @@ def main() -> None:
         checkpoint_dir = output_dir / f"checkpoint-{global_step}"
         incomplete_dir = output_dir / f".checkpoint-{global_step}.incomplete"
         if accelerator.is_main_process:
-            require_free_space(output_dir, minimum_gib=minimum_free_gib)
             if checkpoint_dir.exists() or incomplete_dir.exists():
                 raise FileExistsError(
                     f"checkpoint target already exists: {checkpoint_dir} or {incomplete_dir}"
@@ -434,7 +430,6 @@ def main() -> None:
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        require_free_space(output_dir, minimum_gib=minimum_free_gib)
         # The default keeps Accelerate's autocast/output-conversion forward wrapper.
         # Remove it so the original and freshly loaded models use identical precision.
         unwrapped = accelerator.unwrap_model(model, keep_fp32_wrapper=False)

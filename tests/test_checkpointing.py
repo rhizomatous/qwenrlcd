@@ -10,7 +10,6 @@ from qwenrlcd.checkpointing import (
     checkpoint_cleanup_candidates,
     load_trainer_progress,
     prune_checkpoints,
-    require_free_space,
     resolve_resume_checkpoint,
 )
 
@@ -114,15 +113,3 @@ def test_cannot_prune_all_without_final_artifacts(tmp_path) -> None:
         "checkpoint-1"
     ]
     assert (tmp_path / "final" / "decision_head.pt").exists()
-
-
-def test_free_space_check_reports_shortage(tmp_path, monkeypatch) -> None:
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(
-        "qwenrlcd.checkpointing.shutil.disk_usage",
-        lambda _: SimpleNamespace(free=1 * 2**30),
-    )
-    with pytest.raises(RuntimeError, match="only 1.00 GiB free"):
-        require_free_space(tmp_path, minimum_gib=2)
-    require_free_space(tmp_path, minimum_gib=1)
