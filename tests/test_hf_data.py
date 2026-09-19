@@ -8,8 +8,12 @@ import pytest
 from qwenrlcd.hf_data import (
     HFDatasetBundles,
     bundle_from_dataset_row,
+    select_question_type,
     source_stratified_indices,
 )
+from qwenrlcd.schema import DecisionBundle, QuestionType
+
+from .test_schema import example_dict
 
 
 def test_hf_row_uses_decisions_and_source_without_provenance_details() -> None:
@@ -68,3 +72,15 @@ def test_source_stratified_sample_requires_source_coverage() -> None:
         source_stratified_indices(
             ["a", "b"], ["first", "second"], limit=1, seed=1, split="train"
         )
+
+
+def test_question_type_filter_keeps_bundle_and_option_targets() -> None:
+    bundle = DecisionBundle.from_dict(example_dict())
+    selected = select_question_type([bundle], QuestionType.CHOICE)
+    assert len(selected) == 1
+    assert selected[0].id == bundle.id
+    assert selected[0].state == bundle.state
+    assert [question.id for question in selected[0].questions] == ["route"]
+    assert selected[0].questions[0].target_vector() == [0.75, 0.25]
+    with pytest.raises(ValueError, match="no score questions"):
+        select_question_type(selected, QuestionType.SCORE)

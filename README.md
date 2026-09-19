@@ -74,6 +74,11 @@ deterministic source-stratified subset of whole bundles. `qwenrlcd-preflight --c
 configs/qwen3_1_7b_core_pilot.json` checks packed token lengths without loading the
 model; the pilot config also forbids state truncation during training.
 
+`question_type_filter` can retain only one decision type from those same sampled
+bundles for a controlled training run. `qwenrlcd-diagnose-choice --run-dir
+outputs/qwen3-1.7b-core-pilot-v0` reloads a saved model and reports Choice metrics
+by source and option count against a uniform baseline, with example predictions.
+
 Loss is averaged over questions **within each bundle**, then over bundles. Validation
 reports bundle-macro and source-macro metrics alongside source, question-type,
 choice-count, question-count, and target-entropy slices. `accuracy` is argmax-label

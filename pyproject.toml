@@ -31,6 +31,7 @@ qwenrlcd-synthetic = "qwenrlcd.synthetic:main"
 qwenrlcd-check-parallel = "qwenrlcd.check_parallel:main"
 qwenrlcd-predict = "qwenrlcd.predict:main"
 qwenrlcd-preflight = "qwenrlcd.preflight:main"
+qwenrlcd-diagnose-choice = "qwenrlcd.diagnose_choice:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qwenrlcd"]

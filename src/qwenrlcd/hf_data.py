@@ -61,6 +61,20 @@ class HFDatasetBundles(Sequence[DecisionBundle]):
         return bundle_from_dataset_row(self.dataset[index])
 
 
+def select_question_type(
+    bundles: Sequence[DecisionBundle], question_type: QuestionType
+) -> list[DecisionBundle]:
+    """Keep shared states, but train/evaluate only the selected decision type."""
+    selected = []
+    for bundle in bundles:
+        questions = tuple(q for q in bundle.questions if q.type is question_type)
+        if questions:
+            selected.append(DecisionBundle(bundle.id, bundle.state, questions, bundle.source))
+    if not selected:
+        raise ValueError(f"no {question_type.value} questions in the selected bundles")
+    return selected
+
+
 def source_stratified_indices(
     ids: Sequence[str],
     sources: Sequence[str],
@@ -151,15 +165,19 @@ def load_configured_bundles(config: Mapping[str, Any], split: str) -> Sequence[D
     if "dataset_path" in config:
         if "train_file" in config or "validation_file" in config:
             raise ValueError("configure either dataset_path or JSONL files, not both")
-        return load_hf_bundles(
+        bundles: Sequence[DecisionBundle] = load_hf_bundles(
             str(config["dataset_path"]),
             str(config.get("dataset_config", "core")),
             split,
             sample_size=config.get(f"{split}_bundle_limit"),
             seed=int(config["seed"]),
         )
-    if "train_bundle_limit" in config or "validation_bundle_limit" in config:
-        raise ValueError("bundle limits require dataset_path")
-    from .data import read_jsonl
+    else:
+        if "train_bundle_limit" in config or "validation_bundle_limit" in config:
+            raise ValueError("bundle limits require dataset_path")
+        from .data import read_jsonl
 
-    return read_jsonl(config[f"{split}_file"])
+        bundles = read_jsonl(config[f"{split}_file"])
+    if "question_type_filter" in config:
+        bundles = select_question_type(bundles, QuestionType(config["question_type_filter"]))
+    return bundles

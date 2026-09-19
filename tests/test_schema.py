@@ -62,6 +62,11 @@ def test_permutation_preserves_targets_and_ordered_types() -> None:
     assert [option.key for option in by_id["severity"].options] == ["0", "1", "2"]
     for question in permuted.questions:
         assert sum(question.target_vector()) == pytest.approx(1.0)
+    route = by_id["route"]
+    assert {
+        option.key: probability
+        for option, probability in zip(route.options, route.target_vector(), strict=True)
+    } == {"returns": 0.75, "shipping": 0.25}
 
 
 def test_target_must_sum_to_one() -> None:
