@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 
-from qwenrlcd.hf_data import HFDatasetBundles, bundle_from_dataset_row
+import pytest
+
+from qwenrlcd.hf_data import (
+    HFDatasetBundles,
+    bundle_from_dataset_row,
+    source_stratified_indices,
+)
 
 
 def test_hf_row_uses_decisions_and_source_without_provenance_details() -> None:
@@ -28,3 +35,36 @@ def test_hf_row_uses_decisions_and_source_without_provenance_details() -> None:
     assert bundle.questions[0].target_vector() == [0.25, 0.75]
     assert HFDatasetBundles([row])[0] == bundle
     assert len(HFDatasetBundles([row])) == 1
+
+
+def test_source_stratified_sample_preserves_five_percent_slice() -> None:
+    ids = [f"example-{i}" for i in range(1000)]
+    sources = ["main"] * 950 + ["probability"] * 50
+    indices = source_stratified_indices(
+        ids, sources, limit=200, seed=17, split="train"
+    )
+    assert len(indices) == 200
+    assert len(set(indices)) == 200
+    assert Counter(sources[index] for index in indices) == {
+        "main": 190,
+        "probability": 10,
+    }
+    reordered = list(reversed(list(zip(ids, sources, strict=True))))
+    reversed_indices = source_stratified_indices(
+        [item[0] for item in reordered],
+        [item[1] for item in reordered],
+        limit=200, seed=17, split="train",
+    )
+    assert {ids[index] for index in indices} == {
+        reordered[index][0] for index in reversed_indices
+    }
+    assert indices != source_stratified_indices(
+        ids, sources, limit=200, seed=18, split="train"
+    )
+
+
+def test_source_stratified_sample_requires_source_coverage() -> None:
+    with pytest.raises(ValueError, match="at least one bundle per source"):
+        source_stratified_indices(
+            ["a", "b"], ["first", "second"], limit=1, seed=1, split="train"
+        )

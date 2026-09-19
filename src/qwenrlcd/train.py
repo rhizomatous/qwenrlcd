@@ -40,8 +40,8 @@ def main() -> None:
         load_trainer_progress,
         resolve_resume_checkpoint,
     )
-    from .data import DecisionCollator, DecisionDataset, read_jsonl
-    from .hf_data import load_hf_bundles
+    from .data import DecisionCollator, DecisionDataset
+    from .hf_data import load_configured_bundles
     from .losses import decision_loss
     from .metrics import summarize_validation
     from .model import DecisionModel
@@ -70,17 +70,8 @@ def main() -> None:
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
     )
-    if "dataset_path" in config:
-        if "train_file" in config or "validation_file" in config:
-            raise ValueError("configure either dataset_path or JSONL files, not both")
-        dataset_config = str(config.get("dataset_config", "core"))
-        train_bundles = load_hf_bundles(config["dataset_path"], dataset_config, "train")
-        validation_bundles = load_hf_bundles(
-            config["dataset_path"], dataset_config, "validation"
-        )
-    else:
-        train_bundles = read_jsonl(config["train_file"])
-        validation_bundles = read_jsonl(config["validation_file"])
+    train_bundles = load_configured_bundles(config, "train")
+    validation_bundles = load_configured_bundles(config, "validation")
 
     train_dataset = DecisionDataset(
         train_bundles,
@@ -90,6 +81,7 @@ def main() -> None:
         max_questions=int(config["max_questions"]),
         shuffle=bool(config.get("permute_training", True)),
         seed=seed,
+        require_no_state_truncation=bool(config.get("require_no_state_truncation", False)),
     )
     validation_dataset = DecisionDataset(
         validation_bundles,
@@ -99,6 +91,7 @@ def main() -> None:
         max_questions=int(config["max_questions"]),
         shuffle=False,
         seed=seed,
+        require_no_state_truncation=bool(config.get("require_no_state_truncation", False)),
     )
     train_dataloader = DataLoader(
         train_dataset,

@@ -69,6 +69,11 @@ standard Hugging Face dataset via `dataset_path` and `dataset_config` (for examp
 can replace the local path. The dataset adapter reads decisions and their source
 label; source provenance details are not model inputs.
 
+For a bounded pilot, `train_bundle_limit` and `validation_bundle_limit` select a
+deterministic source-stratified subset of whole bundles. `qwenrlcd-preflight --config
+configs/qwen3_1_7b_core_pilot.json` checks packed token lengths without loading the
+model; the pilot config also forbids state truncation during training.
+
 Loss is averaged over questions **within each bundle**, then over bundles. Validation
 reports bundle-macro and source-macro metrics alongside source, question-type,
 choice-count, question-count, and target-entropy slices. `accuracy` is argmax-label

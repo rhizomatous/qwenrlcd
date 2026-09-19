@@ -73,6 +73,7 @@ class DecisionDataset(Sequence[dict[str, Any]]):
         shuffle: bool,
         seed: int,
         require_targets: bool = True,
+        require_no_state_truncation: bool = False,
     ) -> None:
         self.bundles = bundles
         self.tokenizer = tokenizer
@@ -82,6 +83,7 @@ class DecisionDataset(Sequence[dict[str, Any]]):
         self.shuffle = shuffle
         self.seed = seed
         self.require_targets = require_targets
+        self.require_no_state_truncation = require_no_state_truncation
         self.epoch = 0
 
     def __len__(self) -> int:
@@ -126,6 +128,11 @@ class DecisionDataset(Sequence[dict[str, Any]]):
                 f"leaving no state space within max_length={self.max_length}"
             )
         if len(state_ids) > state_budget:
+            if self.require_no_state_truncation:
+                raise ValueError(
+                    f"bundle {bundle.id} needs {len(state_ids) + branch_token_count} "
+                    f"tokens, above max_length={self.max_length}; state truncation is disabled"
+                )
             state_ids = state_ids[-state_budget:]
 
         input_ids = list(state_ids)
