@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -66,6 +68,84 @@ def _checkpoint_step(path: Path) -> int | None:
     if not suffix.isdigit() or not (path / TRAINER_STATE_FILE).is_file():
         return None
     return int(suffix)
+
+
+def checkpoint_cleanup_candidates(
+    output_dir: str | Path, *, keep_last: int, include_incomplete: bool = False
+) -> list[Path]:
+    """Identify only direct child checkpoint directories eligible for removal."""
+    root = Path(output_dir)
+    if keep_last < 0:
+        raise ValueError("keep_last cannot be negative")
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError(f"not a real run directory: {root}")
+    if not (root / "training_config.json").is_file():
+        raise ValueError(f"missing training_config.json in {root}")
+    if keep_last == 0 and not (
+        (root / "final" / "decision_head.pt").is_file()
+        and (root / "final" / "decision_config.json").is_file()
+        and (root / "final" / "backbone" / "adapter_config.json").is_file()
+        and (
+            (root / "final" / "backbone" / "adapter_model.safetensors").is_file()
+            or (root / "final" / "backbone" / "adapter_model.bin").is_file()
+        )
+        and (root / "validation_metrics.json").is_file()
+    ):
+        raise ValueError("cannot remove all checkpoints without final model and metrics")
+
+    complete: list[tuple[int, Path]] = []
+    incomplete: list[Path] = []
+    for path in root.iterdir():
+        if path.is_symlink() or not path.is_dir():
+            continue
+        if re.fullmatch(r"\.checkpoint-[0-9]+\.incomplete", path.name):
+            incomplete.append(path)
+            continue
+        if not re.fullmatch(r"checkpoint-[0-9]+", path.name):
+            continue
+        step = int(path.name.removeprefix("checkpoint-"))
+        try:
+            progress = load_trainer_progress(path)
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            incomplete.append(path)
+            continue
+        if progress.global_step != step:
+            incomplete.append(path)
+            continue
+        if not (
+            (path / "model.safetensors").is_file()
+            or (path / "trainable_model.safetensors").is_file()
+        ):
+            incomplete.append(path)
+            continue
+        complete.append((step, path))
+    complete.sort()
+    removable = [path for _, path in complete[:max(0, len(complete) - keep_last)]]
+    if include_incomplete:
+        removable.extend(sorted(incomplete))
+    return removable
+
+
+def prune_checkpoints(
+    output_dir: str | Path, *, keep_last: int, include_incomplete: bool = False
+) -> list[Path]:
+    targets = checkpoint_cleanup_candidates(
+        output_dir, keep_last=keep_last, include_incomplete=include_incomplete
+    )
+    for path in targets:
+        shutil.rmtree(path)
+    return targets
+
+
+def require_free_space(path: str | Path, *, minimum_gib: float) -> None:
+    if minimum_gib <= 0:
+        raise ValueError("minimum_gib must be positive")
+    free_gib = shutil.disk_usage(path).free / 2**30
+    if free_gib < minimum_gib:
+        raise RuntimeError(
+            f"only {free_gib:.2f} GiB free at {path}; "
+            f"need at least {minimum_gib:.2f} GiB before saving"
+        )
 
 
 def resolve_resume_checkpoint(

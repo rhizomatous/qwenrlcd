@@ -29,6 +29,8 @@ fi
 echo "[resume-test] phase 1: train through step 7"
 uv run qwenrlcd-train --config "$QWENRLCD_CONFIG" --stop-after-step 7
 test -f "$QWENRLCD_OUTPUT_DIR/checkpoint-7/trainer_state.json"
+test -f "$QWENRLCD_OUTPUT_DIR/checkpoint-7/trainable_model.safetensors"
+test ! -e "$QWENRLCD_OUTPUT_DIR/checkpoint-7/model.safetensors"
 test ! -e "$QWENRLCD_OUTPUT_DIR/final"
 
 echo "[resume-test] phase 2: resume latest and finish"

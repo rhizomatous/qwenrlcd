@@ -22,6 +22,8 @@
   "brier_weight": 0.25,
   "log_every": 20,
   "save_every": 100,
+  "keep_last_checkpoints": 1,
+  "minimum_free_gib": 2.0,
   "gradient_checkpointing": false,
   "trust_remote_code": true,
   "attn_implementation": "eager",

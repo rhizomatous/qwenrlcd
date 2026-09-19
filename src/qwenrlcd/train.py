@@ -38,8 +38,11 @@ def main() -> None:
     from .checkpointing import (
         TrainerProgress,
         load_trainer_progress,
+        prune_checkpoints,
+        require_free_space,
         resolve_resume_checkpoint,
     )
+    from .compact_checkpoint import register_compact_model_state_hooks
     from .data import DecisionCollator, DecisionDataset
     from .hf_data import load_configured_bundles
     from .losses import decision_loss
@@ -158,10 +161,13 @@ def main() -> None:
             model, optimizer, train_dataloader, validation_dataloader, scheduler
         )
     )
+    register_compact_model_state_hooks(accelerator)
 
     output_dir = args.output_dir or Path(config["output_dir"])
+    minimum_free_gib = float(config.get("minimum_free_gib", 2.0))
     if accelerator.is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
+        require_free_space(output_dir, minimum_gib=minimum_free_gib)
         tokenizer.save_pretrained(output_dir / "tokenizer")
         saved_config = {**config, "output_dir": str(output_dir)}
         (output_dir / "training_config.json").write_text(
@@ -215,6 +221,9 @@ def main() -> None:
     save_every = int(config["save_every"])
     if save_every < 1:
         raise ValueError("save_every must be at least one")
+    keep_last_checkpoints = int(config.get("keep_last_checkpoints", 2))
+    if keep_last_checkpoints < 1:
+        raise ValueError("keep_last_checkpoints must be at least one")
 
     def save_checkpoint(epoch: int, next_batch: int) -> None:
         next_epoch = epoch
@@ -222,7 +231,16 @@ def main() -> None:
             next_epoch += 1
             next_batch = 0
         checkpoint_dir = output_dir / f"checkpoint-{global_step}"
-        accelerator.save_state(checkpoint_dir)
+        incomplete_dir = output_dir / f".checkpoint-{global_step}.incomplete"
+        if accelerator.is_main_process:
+            require_free_space(output_dir, minimum_gib=minimum_free_gib)
+            if checkpoint_dir.exists() or incomplete_dir.exists():
+                raise FileExistsError(
+                    f"checkpoint target already exists: {checkpoint_dir} or {incomplete_dir}"
+                )
+            incomplete_dir.mkdir()
+        accelerator.wait_for_everyone()
+        accelerator.save_state(incomplete_dir)
         if accelerator.is_main_process:
             TrainerProgress(
                 epoch=next_epoch,
@@ -232,7 +250,17 @@ def main() -> None:
                 gradient_accumulation_steps=int(
                     config["gradient_accumulation_steps"]
                 ),
-            ).write(checkpoint_dir)
+            ).write(incomplete_dir)
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            incomplete_dir.rename(checkpoint_dir)
+            removed = prune_checkpoints(
+                output_dir, keep_last=keep_last_checkpoints
+            )
+            if removed:
+                accelerator.print(
+                    "pruned old checkpoints: " + ", ".join(path.name for path in removed)
+                )
         accelerator.wait_for_everyone()
 
     model.train()
@@ -285,7 +313,9 @@ def main() -> None:
                     args.stop_after_step is not None
                     and global_step >= args.stop_after_step
                 )
-                if global_step % save_every == 0 or should_stop:
+                if should_stop or (
+                    global_step % save_every == 0 and global_step < total_steps
+                ):
                     save_checkpoint(epoch, batch_index + 1)
                 if should_stop:
                     accelerator.print(
@@ -404,6 +434,7 @@ def main() -> None:
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
+        require_free_space(output_dir, minimum_gib=minimum_free_gib)
         # The default keeps Accelerate's autocast/output-conversion forward wrapper.
         # Remove it so the original and freshly loaded models use identical precision.
         unwrapped = accelerator.unwrap_model(model, keep_fp32_wrapper=False)
