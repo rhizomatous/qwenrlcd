@@ -28,6 +28,13 @@ uv run qwenrlcd-train --config "$QWENRLCD_CONFIG"
 
 test -f "$QWENRLCD_OUTPUT_DIR/final/decision_head.pt"
 test -f "$QWENRLCD_OUTPUT_DIR/validation_metrics.json"
+uv run qwenrlcd-diagnose-choice \
+  --run-dir "$QWENRLCD_OUTPUT_DIR" \
+  --split train \
+  --examples-per-source 0
+uv run qwenrlcd-diagnose-choice \
+  --run-dir "$QWENRLCD_OUTPUT_DIR" \
+  --split validation
 uv run python - "$QWENRLCD_OUTPUT_DIR/validation_metrics.json" <<'PY'
 import json
 import sys
