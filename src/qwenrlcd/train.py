@@ -7,10 +7,50 @@ import random
 from pathlib import Path
 from typing import Any
 
+from .metrics import summarize_validation
+
 
 def load_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _validation_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    summary = summarize_validation(rows)
+    return {
+        "loss": summary["loss"],
+        "accuracy": summary["accuracy"],
+        "expected_accuracy": summary["expected_accuracy"],
+        "brier": summary["brier"],
+        "uniform_brier": summary["uniform_brier"],
+        "nll": summary["negative_log_likelihood"],
+        "ece": summary["expected_calibration_error"],
+        "target_entropy": summary["target_entropy"],
+        "kl": summary["kl_divergence"],
+        "uniform_kl": summary["uniform_kl_divergence"],
+        "js": summary["js_divergence"],
+        "bundles": summary["bundles"],
+        "questions": summary["count"],
+        "slices": {
+            key: value for key, value in summary.items()
+            if key in {
+                "bundle_macro", "source_macro", "by_source", "by_type",
+                "by_choice_count", "by_question_count", "by_target_entropy",
+            }
+        },
+    }
+
+
+def validation_metrics_with_reference(
+    rows: list[dict[str, Any]], reference_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    metrics = _validation_metrics(rows)
+    if reference_ids is not None:
+        reference_rows = [row for row in rows if row["id"] in reference_ids]
+        if len(reference_rows) != len(reference_ids):
+            raise ValueError("reference validation bundle IDs are missing or duplicated")
+        metrics["reference_validation"] = _validation_metrics(reference_rows)
+    return metrics
 
 
 def main() -> None:
@@ -45,7 +85,6 @@ def main() -> None:
     from .data import DecisionCollator, DecisionDataset
     from .hf_data import load_configured_bundles
     from .losses import decision_loss
-    from .metrics import summarize_validation
     from .model import DecisionModel
 
     seed = int(config["seed"])
@@ -74,6 +113,21 @@ def main() -> None:
     )
     train_bundles = load_configured_bundles(config, "train")
     validation_bundles = load_configured_bundles(config, "validation")
+    reference_validation_ids: set[str] | None = None
+    if "validation_reference_bundle_limit" in config:
+        if "dataset_path" not in config:
+            raise ValueError("reference validation requires a Hugging Face dataset")
+        reference_limit = int(config["validation_reference_bundle_limit"])
+        if not 1 <= reference_limit < len(validation_bundles):
+            raise ValueError("reference validation limit must be smaller than validation")
+        reference_config = {**config, "validation_bundle_limit": reference_limit}
+        reference_bundles = load_configured_bundles(reference_config, "validation")
+        reference_validation_ids = {bundle.id for bundle in reference_bundles}
+        if len(reference_validation_ids) != reference_limit:
+            raise ValueError("reference validation bundle IDs are duplicated")
+        validation_ids = {bundle.id for bundle in validation_bundles}
+        if not reference_validation_ids <= validation_ids:
+            raise ValueError("reference validation is not contained in validation")
 
     train_dataset = DecisionDataset(
         train_bundles,
@@ -389,30 +443,12 @@ def main() -> None:
                 "validation bundle IDs are missing or duplicated: "
                 f"{len(unique_validation)} unique for {len(validation_dataset)} rows"
             )
-        summary = summarize_validation(list(unique_validation.values()))
         epoch_metrics: dict[str, Any] = {
             "epoch": epoch,
             "step": global_step,
-            "loss": summary["loss"],
-            "accuracy": summary["accuracy"],
-            "expected_accuracy": summary["expected_accuracy"],
-            "brier": summary["brier"],
-            "uniform_brier": summary["uniform_brier"],
-            "nll": summary["negative_log_likelihood"],
-            "ece": summary["expected_calibration_error"],
-            "target_entropy": summary["target_entropy"],
-            "kl": summary["kl_divergence"],
-            "uniform_kl": summary["uniform_kl_divergence"],
-            "js": summary["js_divergence"],
-            "bundles": summary["bundles"],
-            "questions": summary["count"],
-            "slices": {
-                key: value for key, value in summary.items()
-                if key in {
-                    "bundle_macro", "source_macro", "by_source", "by_type",
-                    "by_choice_count", "by_question_count", "by_target_entropy",
-                }
-            },
+            **validation_metrics_with_reference(
+                list(unique_validation.values()), reference_validation_ids
+            ),
         }
         validation_history.append(epoch_metrics)
         if accelerator.is_main_process:

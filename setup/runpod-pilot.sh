@@ -43,6 +43,15 @@ print(
     f"kl={metrics['kl']:.4f}",
     f"uniform_kl={metrics['uniform_kl']:.4f}",
 )
+if "reference_validation" in metrics:
+    reference = metrics["reference_validation"]
+    print(
+        "[pilot] reference validation",
+        f"bundles={reference['bundles']}",
+        f"questions={reference['questions']}",
+        f"brier={reference['brier']:.4f}",
+        f"kl={reference['kl']:.4f}",
+    )
 for slice_name in ("by_source", "by_type"):
     weighting = "bundle-macro" if slice_name == "by_source" else "question-micro"
     print(f"[pilot] {slice_name} ({weighting})")

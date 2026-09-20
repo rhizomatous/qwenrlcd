@@ -92,6 +92,9 @@ distribution to the model's predicted class. NLL, Brier, target entropy, KL, and
 divergence retain the full soft target.
 The pilot reports Brier and KL against a uniform distribution over each question's
 options, both overall and by source and question type.
+When `validation_reference_bundle_limit` is set below `validation_bundle_limit`,
+the same validation pass also reports that nested reference cohort for direct
+comparison with earlier runs.
 
 ## Tests
 
