@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from qwenrlcd.data import DecisionCollator, DecisionDataset  # noqa: E402
+from qwenrlcd.losses import mask_invalid_choices  # noqa: E402
+from qwenrlcd.model import DecisionModel  # noqa: E402
+from qwenrlcd.schema import DecisionBundle, Question  # noqa: E402
+
+from .test_data import WhitespaceTokenizer  # noqa: E402
+from .test_schema import example_dict  # noqa: E402
+
+
+class EchoBackbone(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = torch.nn.Embedding(256, 4)
+
+    def forward(self, *, input_ids, attention_mask, **_kwargs):
+        allowed = attention_mask["full_attention"][:, 0] == 0
+        weights = allowed.float() / allowed.sum(dim=-1, keepdim=True)
+        return SimpleNamespace(
+            last_hidden_state=torch.bmm(weights, self.embedding(input_ids))
+        )
+
+
+def test_per_option_head_scores_each_marker_and_normalizes() -> None:
+    tokenizer = WhitespaceTokenizer()
+    bundle = DecisionBundle.from_dict(example_dict())
+    dataset = DecisionDataset(
+        [bundle], tokenizer, max_length=512, max_choices=255,
+        max_questions=32, shuffle=False, seed=17,
+    )
+    batch = DecisionCollator(tokenizer, max_choices=255, max_questions=32)([dataset[0]])
+    model = DecisionModel(EchoBackbone(), hidden_size=4, max_choices=255)
+    logits = model(
+        input_ids=batch["input_ids"],
+        position_ids=batch["position_ids"],
+        tree_attention_mask=batch["tree_attention_mask"],
+        decision_indices=batch["decision_indices"],
+    )
+    probabilities = torch.softmax(mask_invalid_choices(logits, batch["num_choices"]), -1)
+
+    assert logits.shape == (1, 3, 3)
+    torch.testing.assert_close(probabilities.sum(-1), torch.ones((1, 3)))
+    assert probabilities[0, 0, 2] == 0
+
+
+def test_option_reordering_preserves_key_aligned_scores() -> None:
+    tokenizer = WhitespaceTokenizer()
+    bundle = DecisionBundle.from_dict(example_dict())
+    route = bundle.questions[0]
+    reversed_route = Question(
+        route.id, route.type, route.instructions,
+        tuple(reversed(route.options)), route.target,
+    )
+    reversed_bundle = DecisionBundle(
+        bundle.id, bundle.state, (reversed_route, *bundle.questions[1:]), bundle.source
+    )
+    dataset = DecisionDataset(
+        [bundle, reversed_bundle], tokenizer, max_length=512,
+        max_choices=255, max_questions=32, shuffle=False, seed=17,
+    )
+    batch = DecisionCollator(tokenizer, max_choices=255, max_questions=32)(
+        [dataset[0], dataset[1]]
+    )
+    model = DecisionModel(EchoBackbone(), hidden_size=4, max_choices=255)
+    logits = model(
+        input_ids=batch["input_ids"],
+        position_ids=batch["position_ids"],
+        tree_attention_mask=batch["tree_attention_mask"],
+        decision_indices=batch["decision_indices"],
+    )
+
+    assert logits[0, 0, 0] != logits[0, 0, 1]
+    torch.testing.assert_close(logits[0, 0, :2], logits[1, 0, :2].flip(0))

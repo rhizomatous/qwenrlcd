@@ -25,6 +25,11 @@ def test_preflight_reports_lengths_and_sources() -> None:
     assert report["question_count_max"] == 3
     assert report["over_max_length"] == 0
     assert report["packed_tokens"]["max"] > 0
+    packed = DecisionDataset(
+        [bundle], tokenizer, max_length=512, max_choices=255,
+        max_questions=32, shuffle=False, seed=17,
+    )[0]
+    assert report["packed_tokens"]["max"] == len(packed["input_ids"])
 
     too_short = inspect_token_lengths(
         [bundle], tokenizer,

@@ -6,13 +6,14 @@ from pathlib import Path
 import pytest
 
 from qwenrlcd.data import (
+    DecisionCollator,
     DecisionDataset,
-    build_tree_attention_pattern,
+    build_option_attention_pattern,
     read_jsonl,
     training_view_bundle,
     write_jsonl,
 )
-from qwenrlcd.schema import DecisionBundle
+from qwenrlcd.schema import DecisionBundle, Question
 from qwenrlcd.synthetic import generate_bundles
 
 from .test_schema import example_dict
@@ -64,22 +65,27 @@ def test_overfit_fixture_has_two_hard_labeled_bundles() -> None:
     )
 
 
-def test_tree_attention_isolates_branches() -> None:
-    pattern = build_tree_attention_pattern(
-        sequence_length=8,
-        state_length=3,
-        branch_spans=((3, 5), (5, 8)),
+def test_tree_attention_isolates_questions_and_options() -> None:
+    pattern = build_option_attention_pattern(
+        sequence_length=14,
+        state_length=2,
+        question_spans=((2, 4, ((4, 6), (6, 8))), (8, 10, ((10, 12), (12, 14)))),
     )
 
-    assert pattern[2][:3] == (True, True, True)
-    assert pattern[4][:5] == (True, True, True, True, True)
-    assert not any(pattern[4][5:])
-    assert pattern[7][:3] == (True, True, True)
-    assert not any(pattern[7][3:5])
-    assert pattern[7][5:8] == (True, True, True)
+    assert pattern[3][:4] == (True, True, True, True)
+    assert pattern[5][:6] == (True,) * 6
+    assert not any(pattern[5][6:])
+    assert pattern[7][:4] == (True,) * 4
+    assert not any(pattern[7][4:6])
+    assert pattern[7][6:8] == (True, True)
+    assert pattern[9][:2] == (True, True)
+    assert not any(pattern[9][2:8])
+    assert pattern[11][:2] == (True, True)
+    assert not any(pattern[11][2:8])
+    assert pattern[11][8:12] == (True,) * 4
 
 
-def test_dataset_resets_logical_positions_for_each_question() -> None:
+def test_dataset_resets_logical_positions_for_each_question_and_option() -> None:
     tokenizer = WhitespaceTokenizer()
     bundle = DecisionBundle.from_dict(example_dict())
     dataset = DecisionDataset(
@@ -94,10 +100,16 @@ def test_dataset_resets_logical_positions_for_each_question() -> None:
 
     example = dataset[0]
     state_length = example["state_length"]
-    for start, end in example["branch_spans"]:
-        assert example["position_ids"][start] == state_length
-        assert example["position_ids"][end - 1] == state_length + (end - start) - 1
-    assert example["decision_indices"] == [end - 1 for _, end in example["branch_spans"]]
+    for question_start, question_end, option_spans in example["option_tree_spans"]:
+        assert example["position_ids"][question_start] == state_length
+        option_position = state_length + question_end - question_start
+        for start, end in option_spans:
+            assert example["position_ids"][start] == option_position
+            assert example["position_ids"][end - 1] == option_position + end - start - 1
+    assert example["decision_indices"] == [
+        [end - 1 for _, end in option_spans]
+        for _, _, option_spans in example["option_tree_spans"]
+    ]
 
 
 def test_dataset_keeps_only_source_and_question_type_for_slices() -> None:
@@ -154,18 +166,58 @@ def test_bundle_and_singleton_have_identical_branch_inputs() -> None:
     bundled = encode(bundle)
     for question_index, question in enumerate(bundle.questions):
         singleton = encode(DecisionBundle(f"single-{question.id}", bundle.state, (question,)))
-        bundled_start, bundled_end = bundled["branch_spans"][question_index]
-        single_start, single_end = singleton["branch_spans"][0]
+        bundled_start, bundled_end, bundled_options = bundled["option_tree_spans"][question_index]
+        single_start, single_end, single_options = singleton["option_tree_spans"][0]
 
         assert bundled["input_ids"][: bundled["state_length"]] == singleton["input_ids"][
             : singleton["state_length"]
         ]
-        assert bundled["input_ids"][bundled_start:bundled_end] == singleton["input_ids"][
-            single_start:single_end
-        ]
-        assert bundled["position_ids"][bundled_start:bundled_end] == singleton[
-            "position_ids"
-        ][single_start:single_end]
+        for (left_start, left_end), (right_start, right_end) in zip(
+            [(bundled_start, bundled_end), *bundled_options],
+            [(single_start, single_end), *single_options],
+            strict=True,
+        ):
+            assert bundled["input_ids"][left_start:left_end] == singleton["input_ids"][
+                right_start:right_end
+            ]
+            assert bundled["position_ids"][left_start:left_end] == singleton[
+                "position_ids"
+            ][right_start:right_end]
+
+
+def test_option_reordering_preserves_keyed_visible_tokens_and_positions() -> None:
+    tokenizer = WhitespaceTokenizer()
+    source = DecisionBundle.from_dict(example_dict())
+    question = source.questions[0]
+    reversed_question = Question(
+        question.id, question.type, question.instructions,
+        tuple(reversed(question.options)), question.target,
+    )
+    bundles = [
+        DecisionBundle("original", source.state, (question,)),
+        DecisionBundle("reversed", source.state, (reversed_question,)),
+    ]
+    dataset = DecisionDataset(
+        bundles, tokenizer, max_length=512, max_choices=255,
+        max_questions=32, shuffle=False, seed=17,
+    )
+
+    def visible_by_key(bundle: DecisionBundle, packed: dict) -> dict:
+        pattern = build_option_attention_pattern(
+            len(packed["input_ids"]), packed["state_length"], packed["option_tree_spans"]
+        )
+        result = {}
+        for option, marker in zip(
+            bundle.questions[0].options, packed["decision_indices"][0], strict=True
+        ):
+            visible = [index for index, allowed in enumerate(pattern[marker]) if allowed]
+            result[option.key] = (
+                [packed["input_ids"][index] for index in visible],
+                [packed["position_ids"][index] for index in visible],
+            )
+        return result
+
+    assert visible_by_key(bundles[0], dataset[0]) == visible_by_key(bundles[1], dataset[1])
 
 
 def test_dataset_requires_targets_only_in_training_mode() -> None:
@@ -200,3 +252,24 @@ def test_dataset_requires_targets_only_in_training_mode() -> None:
     assert inference_dataset[0]["targets"] == [
         [0.0] * len(question.options) for question in bundle.questions
     ]
+
+
+def test_collator_pads_only_to_batch_question_and_option_counts() -> None:
+    torch = pytest.importorskip("torch")
+    tokenizer = WhitespaceTokenizer()
+    full = DecisionBundle.from_dict(example_dict())
+    singleton = DecisionBundle("singleton", full.state, (full.questions[0],))
+    dataset = DecisionDataset(
+        [full, singleton], tokenizer, max_length=512,
+        max_choices=255, max_questions=32, shuffle=False, seed=17,
+    )
+    batch = DecisionCollator(tokenizer, max_choices=255, max_questions=32)(
+        [dataset[0], dataset[1]]
+    )
+
+    assert batch["decision_indices"].shape == (2, 3, 3)
+    assert batch["targets"].shape == (2, 3, 3)
+    assert batch["question_mask"].tolist() == [[True, True, True], [True, False, False]]
+    assert batch["num_choices"].tolist() == [[2, 2, 3], [2, 0, 0]]
+    assert batch["question_ids"][1] == ["route", None, None]
+    torch.testing.assert_close(batch["targets"][0, 0, :2], torch.tensor([0.75, 0.25]))

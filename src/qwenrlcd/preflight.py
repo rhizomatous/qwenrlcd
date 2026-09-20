@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .formatting import render_question, render_state
+from .formatting import render_option, render_question_prefix, render_state
 from .hf_data import load_configured_bundles
 from .schema import DecisionBundle
 from .train import load_config
@@ -39,7 +39,11 @@ def inspect_token_lengths(
             raise ValueError(f"bundle {bundle.id} exceeds max_choices={max_choices}")
         state_length = len(tokenizer(render_state(bundle), add_special_tokens=False)["input_ids"])
         branch_length = sum(
-            len(tokenizer(render_question(question), add_special_tokens=False)["input_ids"])
+            len(tokenizer(render_question_prefix(question), add_special_tokens=False)["input_ids"])
+            + sum(
+                len(tokenizer(render_option(option), add_special_tokens=False)["input_ids"])
+                for option in question.options
+            )
             for question in bundle.questions
         )
         packed_length = state_length + branch_length

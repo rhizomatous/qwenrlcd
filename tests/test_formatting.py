@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from qwenrlcd.formatting import DECISION_MARKER, render_bundle, render_question
+from qwenrlcd.formatting import (
+    DECISION_MARKER,
+    render_bundle,
+    render_option,
+    render_question_prefix,
+)
 from qwenrlcd.schema import DecisionBundle
 
 from .test_schema import example_dict
@@ -11,8 +16,8 @@ def test_render_bundle_contains_state_and_every_decision_slot() -> None:
     rendered = render_bundle(bundle)
 
     assert rendered.count("<|decision_state|>") == 1
-    assert rendered.count(DECISION_MARKER) == 3
-    assert "[0] returns: Damaged items" in rendered
+    assert rendered.count(DECISION_MARKER) == 7
+    assert "key: returns\ndescription: Damaged items" in rendered
     assert "private_route_key" not in rendered
     assert '"target"' not in rendered
 
@@ -22,19 +27,20 @@ def test_question_id_is_not_model_input() -> None:
     value["questions"]["private_route_key"] = value["questions"].pop("route")
     question = DecisionBundle.from_dict(value).questions[0]
 
-    assert "private_route_key" not in render_question(question)
+    assert "private_route_key" not in render_question_prefix(question)
 
 
-def test_noul_omits_absent_criteria_but_renders_explicit_criteria() -> None:
+def test_noul_renders_implicit_keys_and_optional_descriptions() -> None:
     value = example_dict()
     bare = DecisionBundle.from_dict(value).questions[1]
-    assert "<|decision_criteria|>" not in render_question(bare)
+    assert render_option(bare.options[1]) == (
+        "<|decision_option|>\nkey: true\n<|decision|>"
+    )
 
     value["questions"]["urgent"]["criteria"] = {
         "false": "No immediate action is needed",
         "true": "Immediate action is needed",
     }
     explicit = DecisionBundle.from_dict(value).questions[1]
-    rendered = render_question(explicit)
-    assert "<|decision_criteria|>" in rendered
-    assert "[1] true: Immediate action is needed" in rendered
+    rendered = render_option(explicit.options[1])
+    assert "key: true\ndescription: Immediate action is needed" in rendered

@@ -6,7 +6,11 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from .formatting import render_question, render_state
+from .formatting import (
+    render_option,
+    render_question_prefix,
+    render_state,
+)
 from .schema import DecisionBundle
 
 
@@ -41,34 +45,49 @@ def training_view_bundle(
     return bundles[index].permuted(rng)
 
 
-def build_tree_attention_pattern(
+def build_option_attention_pattern(
     sequence_length: int,
     state_length: int,
-    branch_spans: Sequence[tuple[int, int]],
+    question_spans: Sequence[tuple[int, int, Sequence[tuple[int, int]]]],
 ) -> tuple[tuple[bool, ...], ...]:
-    """Return a causal shared-prefix mask with mutually isolated question branches."""
+    """State → question prefix → isolated option leaves, all in one causal pass."""
     if not 0 < state_length <= sequence_length:
         raise ValueError("state_length must be within the sequence")
     allowed = [[False] * sequence_length for _ in range(sequence_length)]
-
     for query in range(state_length):
         for key in range(query + 1):
             allowed[query][key] = True
 
-    for start, end in branch_spans:
-        if not state_length <= start < end <= sequence_length:
-            raise ValueError(f"invalid branch span {(start, end)}")
-        for query in range(start, end):
+    previous_end = state_length
+    for question_start, question_end, options in question_spans:
+        if question_start != previous_end or not question_start < question_end:
+            raise ValueError("question prefixes must follow the previous branch")
+        for query in range(question_start, question_end):
             for key in range(state_length):
                 allowed[query][key] = True
-            for key in range(start, query + 1):
+            for key in range(question_start, query + 1):
                 allowed[query][key] = True
-
+        previous_end = question_end
+        if not options:
+            raise ValueError("each question requires option branches")
+        for option_start, option_end in options:
+            if option_start != previous_end or not option_start < option_end:
+                raise ValueError("option branches must follow the question prefix")
+            for query in range(option_start, option_end):
+                for key in range(state_length):
+                    allowed[query][key] = True
+                for key in range(question_start, question_end):
+                    allowed[query][key] = True
+                for key in range(option_start, query + 1):
+                    allowed[query][key] = True
+            previous_end = option_end
+    if previous_end != sequence_length:
+        raise ValueError("option branches must cover the complete sequence")
     return tuple(tuple(row) for row in allowed)
 
 
 class DecisionDataset(Sequence[dict[str, Any]]):
-    """Pack one state and isolated question branches into one model sequence."""
+    """Pack a state, question prefixes, and isolated option leaves in one sequence."""
 
     def __init__(
         self,
@@ -125,11 +144,20 @@ class DecisionDataset(Sequence[dict[str, Any]]):
                 raise ValueError(f"question {question.id} has no training target")
 
         state_ids = self._encode(render_state(bundle))
-        branch_ids = [self._encode(render_question(question)) for question in bundle.questions]
-        if any(not branch for branch in branch_ids):
-            raise ValueError(f"bundle {bundle.id} contains an empty question branch")
-
-        branch_token_count = sum(map(len, branch_ids))
+        question_ids = [
+            self._encode(render_question_prefix(question)) for question in bundle.questions
+        ]
+        option_ids = [
+            [self._encode(render_option(option)) for option in question.options]
+            for question in bundle.questions
+        ]
+        if any(not prefix for prefix in question_ids) or any(
+            not option for options in option_ids for option in options
+        ):
+            raise ValueError(f"bundle {bundle.id} contains an empty option branch")
+        branch_token_count = sum(map(len, question_ids)) + sum(
+            len(option) for options in option_ids for option in options
+        )
         state_budget = self.max_length - branch_token_count
         if state_budget < 1:
             raise ValueError(
@@ -146,26 +174,12 @@ class DecisionDataset(Sequence[dict[str, Any]]):
 
         input_ids = list(state_ids)
         position_ids = list(range(len(state_ids)))
-        branch_spans: list[tuple[int, int]] = []
-        decision_indices: list[int] = []
-        for branch in branch_ids:
-            start = len(input_ids)
-            input_ids.extend(branch)
-            end = len(input_ids)
-            branch_spans.append((start, end))
-            decision_indices.append(end - 1)
-            position_ids.extend(range(len(state_ids), len(state_ids) + len(branch)))
-
-        return {
+        packed: dict[str, Any] = {
             "id": bundle.id,
             "source": bundle.source or "unspecified",
             "question_ids": [question.id for question in bundle.questions],
             "question_types": [question.type.value for question in bundle.questions],
-            "input_ids": input_ids,
-            "position_ids": position_ids,
             "state_length": len(state_ids),
-            "branch_spans": branch_spans,
-            "decision_indices": decision_indices,
             "num_choices": [len(question.options) for question in bundle.questions],
             "targets": [
                 question.target_vector()
@@ -174,6 +188,32 @@ class DecisionDataset(Sequence[dict[str, Any]]):
                 for question in bundle.questions
             ],
         }
+        option_tree_spans: list[tuple[int, int, list[tuple[int, int]]]] = []
+        option_decision_indices: list[list[int]] = []
+        for prefix, options in zip(question_ids, option_ids, strict=True):
+            question_start = len(input_ids)
+            input_ids.extend(prefix)
+            question_end = len(input_ids)
+            position_ids.extend(range(len(state_ids), len(state_ids) + len(prefix)))
+            spans: list[tuple[int, int]] = []
+            indices: list[int] = []
+            for option in options:
+                option_start = len(input_ids)
+                input_ids.extend(option)
+                option_end = len(input_ids)
+                spans.append((option_start, option_end))
+                indices.append(option_end - 1)
+                position_ids.extend(range(
+                    len(state_ids) + len(prefix),
+                    len(state_ids) + len(prefix) + len(option),
+                ))
+            option_tree_spans.append((question_start, question_end, spans))
+            option_decision_indices.append(indices)
+        packed["option_tree_spans"] = option_tree_spans
+        packed["decision_indices"] = option_decision_indices
+        packed["input_ids"] = input_ids
+        packed["position_ids"] = position_ids
+        return packed
 
 
 class DecisionCollator:
@@ -187,6 +227,10 @@ class DecisionCollator:
 
         batch_size = len(examples)
         max_sequence_length = max(len(example["input_ids"]) for example in examples)
+        question_slots = max(len(example["decision_indices"]) for example in examples)
+        choice_slots = max(max(example["num_choices"]) for example in examples)
+        if question_slots > self.max_questions or choice_slots > self.max_choices:
+            raise ValueError("batch exceeds configured question or option capacity")
         pad_token_id = self.tokenizer.pad_token_id
         if pad_token_id is None:
             raise ValueError("tokenizer must define pad_token_id")
@@ -199,12 +243,12 @@ class DecisionCollator:
             (batch_size, max_sequence_length, max_sequence_length), dtype=torch.bool
         )
         decision_indices = torch.zeros(
-            (batch_size, self.max_questions), dtype=torch.long
+            (batch_size, question_slots, choice_slots), dtype=torch.long
         )
-        num_choices = torch.zeros((batch_size, self.max_questions), dtype=torch.long)
-        question_mask = torch.zeros((batch_size, self.max_questions), dtype=torch.bool)
+        num_choices = torch.zeros((batch_size, question_slots), dtype=torch.long)
+        question_mask = torch.zeros((batch_size, question_slots), dtype=torch.bool)
         targets = torch.zeros(
-            (batch_size, self.max_questions, self.max_choices), dtype=torch.float32
+            (batch_size, question_slots, choice_slots), dtype=torch.float32
         )
         question_ids: list[list[str | None]] = []
         question_types: list[list[str | None]] = []
@@ -214,8 +258,8 @@ class DecisionCollator:
             question_count = len(example["decision_indices"])
             input_ids[row, :sequence_length] = torch.tensor(example["input_ids"])
             position_ids[row, :sequence_length] = torch.tensor(example["position_ids"])
-            pattern = build_tree_attention_pattern(
-                sequence_length, example["state_length"], example["branch_spans"]
+            pattern = build_option_attention_pattern(
+                sequence_length, example["state_length"], example["option_tree_spans"]
             )
             tree_attention_mask[row, :sequence_length, :sequence_length] = torch.tensor(
                 pattern, dtype=torch.bool
@@ -223,9 +267,10 @@ class DecisionCollator:
             for padding_index in range(sequence_length, max_sequence_length):
                 tree_attention_mask[row, padding_index, padding_index] = True
 
-            decision_indices[row, :question_count] = torch.tensor(
-                example["decision_indices"], dtype=torch.long
-            )
+            for question_index, indices in enumerate(example["decision_indices"]):
+                decision_indices[row, question_index, :len(indices)] = torch.tensor(
+                    indices, dtype=torch.long
+                )
             num_choices[row, :question_count] = torch.tensor(
                 example["num_choices"], dtype=torch.long
             )
@@ -234,9 +279,9 @@ class DecisionCollator:
                 targets[row, question_index, : len(target)] = torch.tensor(target)
 
             ids = list(example["question_ids"])
-            question_ids.append(ids + [None] * (self.max_questions - len(ids)))
+            question_ids.append(ids + [None] * (question_slots - len(ids)))
             types = list(example["question_types"])
-            question_types.append(types + [None] * (self.max_questions - len(types)))
+            question_types.append(types + [None] * (question_slots - len(types)))
 
         return {
             "ids": [example["id"] for example in examples],

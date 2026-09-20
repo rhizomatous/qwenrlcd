@@ -9,7 +9,7 @@ from torch import nn
 
 
 class DecisionModel(nn.Module):
-    """Qwen3 with isolated packed question branches and a shared decision head."""
+    """Qwen3 with isolated option branches and one shared scalar scorer."""
 
     def __init__(
         self,
@@ -22,7 +22,7 @@ class DecisionModel(nn.Module):
         self.backbone = backbone
         self.max_choices = max_choices
         self.base_model_id = base_model_id
-        self.decision_head = nn.Linear(hidden_size, max_choices)
+        self.decision_head = nn.Linear(hidden_size, 1)
 
     @classmethod
     def from_pretrained(
@@ -78,6 +78,8 @@ class DecisionModel(nn.Module):
         source = Path(input_dir)
         with (source / "decision_config.json").open(encoding="utf-8") as handle:
             decision_config = json.load(handle)
+        if decision_config.get("head_architecture") != "per_option":
+            raise ValueError("saved model is not a per-option decision model")
 
         resolved_model_id = model_id or decision_config.get("base_model_id")
         if not resolved_model_id:
@@ -142,6 +144,8 @@ class DecisionModel(nn.Module):
         tree_attention_mask: torch.Tensor,
         decision_indices: torch.Tensor,
     ) -> torch.Tensor:
+        if decision_indices.ndim != 3:
+            raise ValueError("decision_indices must have shape [batch, questions, choices]")
         mask_dtype = next(self.backbone.parameters()).dtype
         additive_mask = torch.zeros(
             (*tree_attention_mask.shape[:1], 1, *tree_attention_mask.shape[1:]),
@@ -164,10 +168,10 @@ class DecisionModel(nn.Module):
         hidden_states = outputs.last_hidden_state
 
         batch_rows = torch.arange(hidden_states.shape[0], device=hidden_states.device)
-        batch_rows = batch_rows.unsqueeze(1).expand_as(decision_indices)
+        batch_rows = batch_rows[:, None, None].expand_as(decision_indices)
         pooled = hidden_states[batch_rows, decision_indices]
         pooled = pooled.to(dtype=self.decision_head.weight.dtype)
-        return self.decision_head(pooled)
+        return self.decision_head(pooled).squeeze(-1)
 
     def save_components(self, output_dir: str | Path) -> None:
         destination = Path(output_dir)
@@ -183,7 +187,8 @@ class DecisionModel(nn.Module):
                 {
                     "max_choices": self.max_choices,
                     "base_model_id": self.base_model_id,
-                    "attention_topology": "causal_state_isolated_question_tree",
+                    "attention_topology": "causal_state_question_option_tree",
+                    "head_architecture": "per_option",
                 },
                 indent=2,
             )

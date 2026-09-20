@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .schema import DecisionBundle, Question
+from .schema import DecisionBundle, Option, Question
 
 DECISION_MARKER = "<|decision|>"
 
@@ -18,26 +18,28 @@ def render_state(bundle: DecisionBundle) -> str:
     return "\n".join(("<|decision_state|>", render_jsonlike(bundle.state)))
 
 
-def render_question(question: Question) -> str:
-    """Render one branch without its routing id or training target."""
-    lines = [
+def render_question_prefix(question: Question) -> str:
+    """Common prefix shared by isolated option branches of one question."""
+    return "\n".join((
         "<|decision_question|>",
         f"type: {question.type.value}",
         f"instructions: {render_jsonlike(question.instructions)}",
-    ]
-    has_criteria = not (
-        question.type.value == "noul"
-        and all(option.description is None for option in question.options)
-    )
-    if has_criteria:
-        lines.append("<|decision_criteria|>")
-        for index, option in enumerate(question.options):
-            description = render_jsonlike(option.description)
-            lines.append(f"[{index}] {option.key}: {description}")
+    ))
+
+
+def render_option(option: Option) -> str:
+    """Index-free option branch, ending at its own decision marker."""
+    lines = ["<|decision_option|>", f"key: {option.key}"]
+    if option.description is not None:
+        lines.append(f"description: {render_jsonlike(option.description)}")
     lines.append(DECISION_MARKER)
     return "\n".join(lines)
 
 
 def render_bundle(bundle: DecisionBundle) -> str:
     """Human-readable packed representation; model attention is supplied separately."""
-    return "\n".join([render_state(bundle), *(render_question(q) for q in bundle.questions)])
+    parts = [render_state(bundle)]
+    for question in bundle.questions:
+        parts.append(render_question_prefix(question))
+        parts.extend(render_option(option) for option in question.options)
+    return "\n".join(parts)

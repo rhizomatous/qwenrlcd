@@ -5,10 +5,11 @@ and many typed questions. One model forward returns every question's probability
 
 ## Architecture
 
-The physical input packs the state and all question branches into one sequence. Each branch uses the same logical positions immediately after the state. A tree attention mask permits a branch to see the state and itself, but never another question. Consequently adding, removing, or reordering an unrelated question cannot change the information available to any other branch.
+The physical input packs a shared state, question prefixes, and option branches into one sequence. A tree attention mask lets each question see the state, and each option see the state, its question, and itself—but no sibling options or other questions. Logical positions reset for each question and option branch.
 
-Qwen returns a hidden state at every decision marker. A shared 255-slot linear head turns all markers into logits shaped `[batch, questions, choices]`. Invalid question
-and choice slots are masked.
+Qwen returns a hidden state at each option's decision marker. The same scalar head scores every option; softmax within each question produces its probability distribution. Invalid padded slots are masked. Reordering options reorders their scores by key without changing what any option branch can see. All questions and options are evaluated in one forward pass.
+
+This replaces the earlier positional-head prototype; its saved model components are not loaded by the current implementation.
 
 The initial implementation uses eager attention and a dense tree mask. FlashAttention cannot express this topology directly. Sparse/FlexAttention optimization may be possible optimizations but have not been tried yet.
 
@@ -59,7 +60,8 @@ Each line is one shared state with a map of labeled questions:
 
 Question IDs are response-routing keys and are deliberately excluded from model input.
 Noul `criteria` is optional, matching the System One API. When omitted, the model sees
-only the question type and instructions; the false/true output ordering remains fixed.
+the question type, instructions, and the `false`/`true` option keys, without
+fabricated criterion descriptions.
 
 ## Training data and metrics
 
@@ -76,7 +78,7 @@ model; the pilot config also forbids state truncation during training.
 
 `question_type_filter` can retain only one decision type from those same sampled
 bundles for a controlled training run. `qwenrlcd-diagnose-choice --run-dir
-outputs/qwen3-1.7b-core-pilot-v0` reloads a saved model and reports Choice metrics
+outputs/your-run` reloads a saved model and reports Choice metrics
 by source and option count against a uniform baseline, with example predictions.
 For a run trained with option permutation, add `--split train
 --training-epoch-view 3` to evaluate the exact packed inputs seen in epoch 3
@@ -106,7 +108,7 @@ pytest
 A saved run contains the tokenizer, LoRA adapter, decision head, and training configuration. It can be used like so:
 
 ```bash
-qwenrlcd-predict --run-dir outputs/qwen3-1.7b-parallel-smoke --input data/smoke_inference.jsonl --output predictions.jsonl
+qwenrlcd-predict --run-dir outputs/your-run --input data/smoke_inference.jsonl --output predictions.jsonl
 ```
 
 The output is keyed by bundle and question IDs.

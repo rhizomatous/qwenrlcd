@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .schema import DecisionBundle
+from .schema import DecisionBundle, Question, QuestionType
 from .train import load_config
 
 
@@ -97,9 +97,16 @@ def main() -> None:
             )
         return logits.float().cpu(), batch["question_ids"]
 
-    bundle = read_jsonl(config["validation_file"])[0]
-    if len(bundle.questions) < 2:
-        raise SystemExit("parallelism check requires a bundle with at least two questions")
+    bundle = next(
+        (
+            candidate for candidate in read_jsonl(config["validation_file"])
+            if len(candidate.questions) >= 2
+            and any(question.type is QuestionType.CHOICE for question in candidate.questions)
+        ),
+        None,
+    )
+    if bundle is None:
+        raise SystemExit("parallelism check requires a multi-question Choice bundle")
 
     bundled_logits, bundled_ids = run([bundle])
     singletons = [
@@ -109,6 +116,17 @@ def main() -> None:
     singleton_logits, singleton_ids = run(singletons)
     reversed_bundle = DecisionBundle(bundle.id, bundle.state, tuple(reversed(bundle.questions)))
     reversed_logits, reversed_ids = run([reversed_bundle])
+    choice = next(q for q in bundle.questions if q.type is QuestionType.CHOICE)
+    flipped_question = Question(
+        choice.id, choice.type, choice.instructions,
+        tuple(reversed(choice.options)), choice.target,
+    )
+    flipped_bundle = DecisionBundle(
+        bundle.id, bundle.state,
+        tuple(flipped_question if q.id == choice.id else q for q in bundle.questions),
+        bundle.source,
+    )
+    flipped_logits, flipped_ids = run([flipped_bundle])
 
     bundled_by_id = {
         question_id: bundled_logits[0, index]
@@ -125,9 +143,15 @@ def main() -> None:
         for index, question_id in enumerate(reversed_ids[0])
         if question_id is not None
     }
+    flipped_by_id = {
+        question_id: flipped_logits[0, index]
+        for index, question_id in enumerate(flipped_ids[0])
+        if question_id is not None
+    }
 
     max_singleton_delta = 0.0
     max_reordered_delta = 0.0
+    max_option_reordered_delta = 0.0
     comparisons: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     for question in bundle.questions:
         size = len(question.options)
@@ -142,15 +166,25 @@ def main() -> None:
             max_reordered_delta, float((reordered - bundled).abs().max())
         )
 
+    original_choice_logits = bundled_by_id[choice.id][:len(choice.options)]
+    flipped_choice_logits = flipped_by_id[choice.id][:len(choice.options)].flip(0)
+    max_option_reordered_delta = float(
+        (flipped_choice_logits - original_choice_logits).abs().max()
+    )
+
     print("parallel invariance diagnostics", flush=True)
     print("precision=float32 tf32=false", flush=True)
     print(f"questions={len(bundle.questions)}", flush=True)
     print(f"max_singleton_logit_delta={max_singleton_delta:.6f}", flush=True)
     print(f"max_reordered_logit_delta={max_reordered_delta:.6f}", flush=True)
+    print(f"max_option_reordered_logit_delta={max_option_reordered_delta:.6f}", flush=True)
 
     for bundled, singleton, reordered in comparisons:
         torch.testing.assert_close(singleton, bundled, atol=args.atol, rtol=args.rtol)
         torch.testing.assert_close(reordered, bundled, atol=args.atol, rtol=args.rtol)
+    torch.testing.assert_close(
+        flipped_choice_logits, original_choice_logits, atol=args.atol, rtol=args.rtol
+    )
     print("parallel invariance passed")
 
 
