@@ -73,7 +73,7 @@ label; source provenance details are not model inputs.
 
 For a bounded pilot, `train_bundle_limit` and `validation_bundle_limit` select a
 deterministic source-stratified subset of whole bundles. `qwenrlcd-preflight --config
-configs/qwen3_1_7b_core_pilot.json` checks packed token lengths without loading the
+configs/qwen3_1_7b_core_option_pilot.json` checks packed token lengths without loading the
 model; the pilot config also forbids state truncation during training.
 
 `question_type_filter` can retain only one decision type from those same sampled
@@ -90,6 +90,8 @@ choice-count, question-count, and target-entropy slices. `accuracy` is argmax-la
 agreement; `expected_accuracy` and ECE use the probability assigned by the target
 distribution to the model's predicted class. NLL, Brier, target entropy, KL, and JS
 divergence retain the full soft target.
+The pilot reports Brier and KL against a uniform distribution over each question's
+options, both overall and by source and question type.
 
 ## Tests
 

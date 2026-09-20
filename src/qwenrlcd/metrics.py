@@ -101,7 +101,19 @@ def _metric_dict(questions: Sequence[dict[str, Any]]) -> dict[str, float | int]:
         [question["probabilities"] for question in questions],
         [question["target"] for question in questions],
     )
-    return {"count": len(questions), **asdict(metrics)}
+    uniform = _uniform_metrics(questions)
+    return {
+        "count": len(questions), **asdict(metrics),
+        "uniform_brier": uniform.brier,
+        "uniform_kl_divergence": uniform.kl_divergence,
+    }
+
+
+def _uniform_metrics(questions: Sequence[dict[str, Any]]) -> CalibrationMetrics:
+    targets = [question["target"] for question in questions]
+    return calibration_metrics(
+        [[1.0 / len(target)] * len(target) for target in targets], targets
+    )
 
 
 def _macro_metrics(groups: Sequence[Sequence[dict[str, Any]]]) -> dict[str, float | int]:
@@ -109,6 +121,7 @@ def _macro_metrics(groups: Sequence[Sequence[dict[str, Any]]]) -> dict[str, floa
         [question["probabilities"] for question in group],
         [question["target"] for question in group],
     ) for group in groups]
+    uniform = [_uniform_metrics(group) for group in groups]
     return {
         "count": len(summaries),
         **{
@@ -116,6 +129,9 @@ def _macro_metrics(groups: Sequence[Sequence[dict[str, Any]]]) -> dict[str, floa
             / len(summaries)
             for field in fields(CalibrationMetrics)
         },
+        "uniform_brier": sum(value.brier for value in uniform) / len(uniform),
+        "uniform_kl_divergence": sum(value.kl_divergence for value in uniform)
+        / len(uniform),
     }
 
 
@@ -172,6 +188,12 @@ def summarize_validation(bundles: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 / len(source_summaries)
                 for field in fields(CalibrationMetrics)
             },
+            "uniform_brier": sum(
+                summary["uniform_brier"] for summary in source_summaries.values()
+            ) / len(source_summaries),
+            "uniform_kl_divergence": sum(
+                summary["uniform_kl_divergence"] for summary in source_summaries.values()
+            ) / len(source_summaries),
         },
         "by_source": source_summaries,
         "by_type": {key: _metric_dict(value) for key, value in sorted(by_type.items())},

@@ -55,6 +55,12 @@ def test_validation_reports_source_type_and_bundle_macros() -> None:
     assert summary["by_type"]["noul"]["count"] == 3
     assert summary["by_question_count"]["3"]["count"] == 3
     assert summary["by_choice_count"]["2"]["count"] == 4
+    assert summary["uniform_brier"] == pytest.approx(0.5)
+    assert summary["uniform_kl_divergence"] == pytest.approx(math.log(2))
+    assert summary["by_source"]["source_a"]["uniform_brier"] == pytest.approx(0.5)
+    assert summary["by_type"]["noul"]["uniform_kl_divergence"] == pytest.approx(
+        math.log(2)
+    )
 
 
 def test_source_metrics_weight_bundles_equally_within_source() -> None:
@@ -67,3 +73,21 @@ def test_source_metrics_weight_bundles_equally_within_source() -> None:
     assert summary["accuracy"] == pytest.approx(0.25)
     assert summary["by_source"]["same"]["accuracy"] == pytest.approx(0.5)
     assert summary["source_macro"]["accuracy"] == pytest.approx(0.5)
+
+
+def test_uniform_baseline_respects_soft_targets_and_option_count() -> None:
+    summary = summarize_validation([
+        {
+            "id": "soft", "source": "fixture", "loss": 0.0,
+            "questions": [
+                {"type": "choice", "probabilities": [0.2, 0.3, 0.5],
+                 "target": [1 / 3, 1 / 3, 1 / 3]},
+                {"type": "noul", "probabilities": [0.6, 0.4],
+                 "target": [1.0, 0.0]},
+            ],
+        },
+    ])
+    assert summary["by_type"]["choice"]["uniform_brier"] == pytest.approx(0.0)
+    assert summary["by_type"]["choice"]["uniform_kl_divergence"] == pytest.approx(0.0)
+    assert summary["uniform_brier"] == pytest.approx(0.25)
+    assert summary["uniform_kl_divergence"] == pytest.approx(math.log(2) / 2)
