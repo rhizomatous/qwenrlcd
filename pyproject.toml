@@ -34,6 +34,7 @@ qwenrlcd-preflight = "qwenrlcd.preflight:main"
 qwenrlcd-diagnose-choice = "qwenrlcd.diagnose_choice:main"
 qwenrlcd-choice-capacity = "qwenrlcd.choice_capacity:main"
 qwenrlcd-choice-capacity-report = "qwenrlcd.choice_capacity_report:main"
+qwenrlcd-benchmark = "qwenrlcd.benchmark:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qwenrlcd"]

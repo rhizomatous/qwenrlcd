@@ -114,3 +114,13 @@ qwenrlcd-predict --run-dir outputs/your-run --input data/smoke_inference.jsonl -
 ```
 
 The output is keyed by bundle and question IDs.
+
+## Inference performance
+
+`bash setup/runpod-benchmark.sh` compares one bundled forward with sequential
+single-question forwards and GPU-batched single-question forwards using the saved
+10k pilot. It sweeps 1, 4, 8, 16, and 28 Noul questions over short and long shared
+states, reporting model-only latency, peak GPU allocation, dense attention token
+pair counts,
+and prediction agreement. Inputs are tokenized and moved to the GPU before timing;
+the synthetic states test computational shape, not task accuracy.
