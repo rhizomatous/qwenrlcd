@@ -38,10 +38,19 @@ def test_score_report_groups_dimensions_and_excludes_tied_mode_targets() -> None
     assert report["overall"]["count"] == 3
     assert report["overall"]["adjacent_mode_miss"] == 1
     assert report["overall"]["far_mode_miss"] == 1
+    assert report["overall"]["underpredicted_mode"] == 0
+    assert report["overall"]["overpredicted_mode"] == 2
     assert report["overall"]["target_mode_ties_excluded"] == 1
     assert report["by_source"]["dynasent"]["model"]["expected_score_mae"] == pytest.approx(1)
+    assert report["by_source"]["dynasent"]["model"]["expected_score_bias"] == pytest.approx(1)
     assert report["by_dimension"]["helpsteer2/helpfulness"]["count"] == 2
     assert len(report["worst_examples_by_dimension"]) == 2
+    worst = report["worst_examples_by_dimension"][1]
+    assert worst["predicted_expected_score"] == pytest.approx(4)
+    assert worst["target_expected_score"] == pytest.approx(0)
+    assert worst["expected_score_error"] == pytest.approx(4)
+    assert worst["predicted_mode"] == 4
+    assert worst["target_modes"] == [0]
 
 
 def test_score_report_rejects_misaligned_or_unordered_levels() -> None:

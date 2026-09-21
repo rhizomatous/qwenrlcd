@@ -9,6 +9,10 @@ from typing import Any
 from .metrics import calibration_metrics
 
 
+def expected_level(distribution: Sequence[float]) -> float:
+    return sum(index * value for index, value in enumerate(distribution))
+
+
 def ranked_probability_score(prediction: Sequence[float], target: Sequence[float]) -> float:
     """Mean squared cumulative-distribution error over the K-1 ordinal boundaries."""
     if len(prediction) != len(target) or len(target) < 2:
@@ -29,20 +33,16 @@ def _score_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     uniform = [[1.0 / len(target)] * len(target) for target in targets]
 
     def ordinal_metrics(candidate: list[list[float]]) -> dict[str, float]:
+        signed_errors = [
+            expected_level(prediction) - expected_level(target)
+            for prediction, target in zip(candidate, targets, strict=True)
+        ]
         return {
-            "expected_score_mae": sum(
-                abs(
-                    sum(index * value for index, value in enumerate(prediction))
-                    - sum(index * value for index, value in enumerate(target))
-                )
-                for prediction, target in zip(candidate, targets, strict=True)
-            ) / len(rows),
+            "expected_score_bias": sum(signed_errors) / len(rows),
+            "expected_score_mae": sum(abs(error) for error in signed_errors) / len(rows),
             "normalized_expected_score_mae": sum(
-                abs(
-                    sum(index * value for index, value in enumerate(prediction))
-                    - sum(index * value for index, value in enumerate(target))
-                ) / (len(target) - 1)
-                for prediction, target in zip(candidate, targets, strict=True)
+                abs(error) / (len(target) - 1)
+                for error, target in zip(signed_errors, targets, strict=True)
             ) / len(rows),
             "ranked_probability_score": sum(
                 ranked_probability_score(prediction, target)
@@ -50,7 +50,7 @@ def _score_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             ) / len(rows),
         }
 
-    distances = []
+    mode_errors = []
     ties = 0
     for prediction, target in zip(predictions, targets, strict=True):
         maximum = max(target)
@@ -62,7 +62,9 @@ def _score_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             ties += 1
             continue
         predicted_mode = max(range(len(prediction)), key=prediction.__getitem__)
-        distances.append(abs(predicted_mode - target_modes[0]))
+        mode_errors.append(predicted_mode - target_modes[0])
+
+    distances = [abs(error) for error in mode_errors]
 
     return {
         "count": len(rows),
@@ -71,6 +73,8 @@ def _score_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "exact_mode": distances.count(0),
         "adjacent_mode_miss": distances.count(1),
         "far_mode_miss": sum(distance >= 2 for distance in distances),
+        "underpredicted_mode": sum(error < 0 for error in mode_errors),
+        "overpredicted_mode": sum(error > 0 for error in mode_errors),
         "mean_mode_distance": sum(distances) / len(distances) if distances else None,
         "model": {
             **asdict(calibration_metrics(predictions, targets)),
@@ -105,15 +109,27 @@ def summarize_score_predictions(
             key=lambda item: ranked_probability_score(item["probabilities"], item["target"]),
             reverse=True,
         )[:examples_per_group]:
+            predicted = row["probabilities"]
+            target = row["target"]
+            target_maximum = max(target)
             examples.append({
                 "group": group,
                 "bundle_id": row["bundle_id"],
                 "state_excerpt": row["state_excerpt"],
                 "instructions": row["instructions"],
-                "predicted": row["probabilities"],
-                "target": row["target"],
+                "options": row["options"],
+                "predicted": predicted,
+                "target": target,
+                "predicted_expected_score": expected_level(predicted),
+                "target_expected_score": expected_level(target),
+                "expected_score_error": expected_level(predicted) - expected_level(target),
+                "predicted_mode": max(range(len(predicted)), key=predicted.__getitem__),
+                "target_modes": [
+                    index for index, value in enumerate(target)
+                    if math.isclose(value, target_maximum, abs_tol=1e-8, rel_tol=0)
+                ],
                 "ranked_probability_score": ranked_probability_score(
-                    row["probabilities"], row["target"]
+                    predicted, target
                 ),
             })
     return {

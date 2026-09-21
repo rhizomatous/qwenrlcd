@@ -78,13 +78,32 @@ def main() -> None:
         ):
             print(
                 f"score {name} n={summary['count']} "
+                f"bias={summary['model']['expected_score_bias']:+.4f} "
                 f"expected_mae={summary['model']['expected_score_mae']:.4f} "
                 f"uniform_mae={summary['uniform']['expected_score_mae']:.4f} "
                 f"rps={summary['model']['ranked_probability_score']:.4f} "
                 f"uniform_rps={summary['uniform']['ranked_probability_score']:.4f} "
                 f"mode_misses=near:{summary['adjacent_mode_miss']} "
-                f"far:{summary['far_mode_miss']} ties:{summary['target_mode_ties_excluded']}"
+                f"far:{summary['far_mode_miss']} "
+                f"under:{summary['underpredicted_mode']} over:{summary['overpredicted_mode']} "
+                f"ties:{summary['target_mode_ties_excluded']}"
             )
+        for example in score_report["worst_examples_by_dimension"]:
+            if example["group"] not in (
+                "helpsteer2/correctness", "helpsteer2/helpfulness"
+            ):
+                continue
+            print(
+                f"score worst {example['group']} bundle={example['bundle_id']} "
+                f"expected={example['target_expected_score']:.3f} "
+                f"predicted={example['predicted_expected_score']:.3f} "
+                f"error={example['expected_score_error']:+.3f} "
+                f"target_modes={example['target_modes']} "
+                f"predicted_mode={example['predicted_mode']} "
+                f"rps={example['ranked_probability_score']:.3f}"
+            )
+            print(f"  state: {example['state_excerpt']}")
+            print(f"  question: {example['instructions']}")
         print(f"score diagnostic saved: {score_output}")
 
     if args.mode in ("all", "choice-set"):
