@@ -210,9 +210,10 @@ def _excerpt(value: Any, limit: int = 240) -> str:
     return rendered if len(rendered) <= limit else rendered[:limit] + "…"
 
 
-def predict_choice_rows(
+def predict_decision_rows(
     bundles: Sequence[DecisionBundle], *, model: Any, tokenizer: Any,
     config: dict[str, Any], batch_size: int, device: Any,
+    question_type: QuestionType,
 ) -> list[dict[str, Any]]:
     import torch
     from torch.utils.data import DataLoader
@@ -257,7 +258,7 @@ def predict_choice_rows(
             batch_bundles = bundles[bundle_offset : bundle_offset + len(batch["ids"])]
             for batch_index, bundle in enumerate(batch_bundles):
                 for question_index, question in enumerate(bundle.questions):
-                    if question.type is not QuestionType.CHOICE:
+                    if question.type is not question_type:
                         continue
                     rows.append({
                         "source": bundle.source or "unspecified",
@@ -276,6 +277,16 @@ def predict_choice_rows(
                     })
             bundle_offset += len(batch["ids"])
     return rows
+
+
+def predict_choice_rows(
+    bundles: Sequence[DecisionBundle], *, model: Any, tokenizer: Any,
+    config: dict[str, Any], batch_size: int, device: Any,
+) -> list[dict[str, Any]]:
+    return predict_decision_rows(
+        bundles, model=model, tokenizer=tokenizer, config=config,
+        batch_size=batch_size, device=device, question_type=QuestionType.CHOICE,
+    )
 
 
 def main() -> None:
