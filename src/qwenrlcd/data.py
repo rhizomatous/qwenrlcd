@@ -11,7 +11,7 @@ from .formatting import (
     render_question_prefix,
     render_state,
 )
-from .schema import DecisionBundle
+from .schema import DecisionBundle, QuestionType
 
 
 def read_jsonl(path: str | Path) -> list[DecisionBundle]:
@@ -250,6 +250,7 @@ class DecisionCollator:
         targets = torch.zeros(
             (batch_size, question_slots, choice_slots), dtype=torch.float32
         )
+        score_mask = torch.zeros((batch_size, question_slots), dtype=torch.bool)
         question_ids: list[list[str | None]] = []
         question_types: list[list[str | None]] = []
 
@@ -282,6 +283,9 @@ class DecisionCollator:
             question_ids.append(ids + [None] * (question_slots - len(ids)))
             types = list(example["question_types"])
             question_types.append(types + [None] * (question_slots - len(types)))
+            score_mask[row, :question_count] = torch.tensor(
+                [question_type == QuestionType.SCORE.value for question_type in types]
+            )
 
         return {
             "ids": [example["id"] for example in examples],
@@ -294,5 +298,6 @@ class DecisionCollator:
             "decision_indices": decision_indices,
             "num_choices": num_choices,
             "question_mask": question_mask,
+            "score_mask": score_mask,
             "targets": targets,
         }

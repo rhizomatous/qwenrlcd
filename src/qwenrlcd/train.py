@@ -338,8 +338,10 @@ def main() -> None:
                     batch["targets"],
                     batch["num_choices"],
                     batch["question_mask"],
+                    batch["score_mask"],
                     ce_weight=float(config["ce_weight"]),
                     brier_weight=float(config["brier_weight"]),
+                    ordinal_rps_weight=float(config.get("ordinal_rps_weight", 0.0)),
                 )
                 accelerator.backward(losses.total)
                 if accelerator.sync_gradients:
@@ -357,7 +359,8 @@ def main() -> None:
                         f"epoch={epoch} step={global_step}/{total_steps} "
                         f"loss={losses.total.item():.4f} "
                         f"ce={losses.cross_entropy.item():.4f} "
-                        f"brier={losses.brier.item():.4f}"
+                        f"brier={losses.brier.item():.4f} "
+                        f"score_rps={losses.ordinal_rps.item():.4f}"
                     )
                 should_stop = (
                     args.stop_after_step is not None
@@ -395,8 +398,10 @@ def main() -> None:
                     batch["targets"],
                     batch["num_choices"],
                     batch["question_mask"],
+                    batch["score_mask"],
                     ce_weight=float(config["ce_weight"]),
                     brier_weight=float(config["brier_weight"]),
+                    ordinal_rps_weight=float(config.get("ordinal_rps_weight", 0.0)),
                 )
                 probabilities = losses.probabilities.detach().float().cpu()
                 targets = batch["targets"].float().cpu()

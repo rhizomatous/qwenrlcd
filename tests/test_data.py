@@ -270,6 +270,7 @@ def test_collator_pads_only_to_batch_question_and_option_counts() -> None:
     assert batch["decision_indices"].shape == (2, 3, 3)
     assert batch["targets"].shape == (2, 3, 3)
     assert batch["question_mask"].tolist() == [[True, True, True], [True, False, False]]
+    assert batch["score_mask"].tolist() == [[False, False, True], [False, False, False]]
     assert batch["num_choices"].tolist() == [[2, 2, 3], [2, 0, 0]]
     assert batch["question_ids"][1] == ["route", None, None]
     torch.testing.assert_close(batch["targets"][0, 0, :2], torch.tensor([0.75, 0.25]))

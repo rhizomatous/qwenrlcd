@@ -22,6 +22,7 @@
   "max_grad_norm": 1.0,
   "ce_weight": 1.0,
   "brier_weight": 0.25,
+  "ordinal_rps_weight": 0.0,
   "log_every": 250,
   "save_every": 1250,
   "keep_last_checkpoints": 1,
