@@ -46,22 +46,3 @@ bash setup/runpod-smoke.sh
 ```
 
 Detach with `Ctrl-b`, then `d`; reattach with `tmux attach -t qwenrlcd`.
-
-## 5. Calibrate and run full training
-
-The first command preflights the complete core train/development splits, performs
-250 real optimizer steps, records an ETA, and saves a resumable checkpoint:
-
-```bash
-QWENRLCD_STOP_AFTER_STEP=250 setup/runpod-full.sh
-```
-
-If the reported runtime is acceptable, resume the same run:
-
-```bash
-setup/runpod-full.sh
-```
-
-Timing is also written to
-`outputs/qwen3-1.7b-core-option-full-v0/training_timing.json`. The runner refuses
-to overwrite a completed model and never reads `test` or `test_ood`.
