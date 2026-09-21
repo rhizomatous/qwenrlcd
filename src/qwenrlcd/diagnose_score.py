@@ -7,6 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 from .metrics import calibration_metrics
+from .schema import DecisionBundle
 
 
 def expected_level(distribution: Sequence[float]) -> float:
@@ -23,6 +24,15 @@ def ranked_probability_score(prediction: Sequence[float], target: Sequence[float
         target_cdf += expected
         total += (predicted_cdf - target_cdf) ** 2
     return total / (len(target) - 1)
+
+
+def select_source_bundles(
+    bundles: Sequence[DecisionBundle], source: str
+) -> list[DecisionBundle]:
+    selected = [bundle for bundle in bundles if bundle.source == source]
+    if not selected:
+        raise ValueError(f"no bundles found for source {source!r}")
+    return selected
 
 
 def _score_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:

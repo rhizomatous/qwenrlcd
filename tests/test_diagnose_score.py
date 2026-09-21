@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from qwenrlcd.diagnose_score import ranked_probability_score, summarize_score_predictions
+from qwenrlcd.diagnose_score import (
+    ranked_probability_score,
+    select_source_bundles,
+    summarize_score_predictions,
+)
+from qwenrlcd.schema import DecisionBundle
+
+from .test_schema import example_dict
 
 
 def _row(source: str, question_id: str, predicted: list[float], target: list[float]) -> dict:
@@ -61,3 +68,16 @@ def test_score_report_rejects_misaligned_or_unordered_levels() -> None:
     row["options"].pop()
     with pytest.raises(ValueError, match="align"):
         summarize_score_predictions([row])
+
+
+def test_select_source_bundles_preserves_only_requested_source() -> None:
+    first_value = example_dict()
+    first_value["source"] = "first"
+    second_value = example_dict()
+    second_value["id"] = "second"
+    second_value["source"] = "second"
+    bundles = [DecisionBundle.from_dict(first_value), DecisionBundle.from_dict(second_value)]
+
+    assert select_source_bundles(bundles, "second") == [bundles[1]]
+    with pytest.raises(ValueError, match="no bundles"):
+        select_source_bundles(bundles, "missing")

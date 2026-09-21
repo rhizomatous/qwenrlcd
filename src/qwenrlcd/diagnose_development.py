@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from .choice_set_probe import build_choice_set_probe, summarize_choice_set_probe
 from .diagnose_choice import predict_decision_rows
-from .diagnose_score import summarize_score_predictions
+from .diagnose_score import select_source_bundles, summarize_score_predictions
 from .schema import QuestionType
 
 
@@ -17,9 +18,13 @@ def main() -> None:
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--mode", choices=("all", "score", "choice-set"), default="all")
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--score-split", choices=("train", "validation"), default="validation")
+    parser.add_argument("--score-source")
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error("batch-size must be positive")
+    if args.score_source is not None and not re.fullmatch(r"[a-z0-9_]+", args.score_source):
+        parser.error("score-source must contain only lowercase letters, digits, and underscores")
     if not (args.run_dir / "final" / "decision_head.pt").is_file():
         parser.error("run directory needs a saved final model")
 
@@ -55,8 +60,10 @@ def main() -> None:
     model.eval()
 
     if args.mode in ("all", "score"):
-        # Only the configured development-validation sample is read. Never load test here.
-        source_bundles = load_configured_bundles(config, "validation")
+        # This command deliberately supports only configured train/development data.
+        source_bundles = load_configured_bundles(config, args.score_split)
+        if args.score_source is not None:
+            source_bundles = select_source_bundles(source_bundles, args.score_source)
         score_bundles = select_question_type(source_bundles, QuestionType.SCORE)
         score_rows = predict_decision_rows(
             score_bundles, model=model, tokenizer=tokenizer, config=config,
@@ -64,11 +71,15 @@ def main() -> None:
         )
         score_report = summarize_score_predictions(score_rows)
         score_report["view"] = {
-            "split": "validation",
+            "split": args.score_split,
+            "source": args.score_source,
             "score_branches_only": True,
-            "configured_validation_bundle_limit": config.get("validation_bundle_limit"),
+            "configured_bundle_limit": config.get(f"{args.score_split}_bundle_limit"),
         }
-        score_output = args.run_dir / "score_validation_diagnostic.json"
+        source_suffix = f"_{args.score_source}" if args.score_source else ""
+        score_output = (
+            args.run_dir / f"score_{args.score_split}{source_suffix}_diagnostic.json"
+        )
         score_output.write_text(
             json.dumps(score_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
@@ -77,7 +88,7 @@ def main() -> None:
             *score_report["by_dimension"].items(),
         ):
             print(
-                f"score {name} n={summary['count']} "
+                f"score {args.score_split} {name} n={summary['count']} "
                 f"bias={summary['model']['expected_score_bias']:+.4f} "
                 f"expected_mae={summary['model']['expected_score_mae']:.4f} "
                 f"uniform_mae={summary['uniform']['expected_score_mae']:.4f} "
@@ -94,7 +105,8 @@ def main() -> None:
             ):
                 continue
             print(
-                f"score worst {example['group']} bundle={example['bundle_id']} "
+                f"score {args.score_split} worst {example['group']} "
+                f"bundle={example['bundle_id']} "
                 f"expected={example['target_expected_score']:.3f} "
                 f"predicted={example['predicted_expected_score']:.3f} "
                 f"error={example['expected_score_error']:+.3f} "
