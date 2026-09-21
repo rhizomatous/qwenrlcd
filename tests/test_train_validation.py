@@ -82,10 +82,12 @@ def test_full_config_only_removes_limits_and_changes_operational_fields() -> Non
         full = json.load(handle)
     permitted_changes = {
         "train_bundle_limit", "validation_bundle_limit", "output_dir",
-        "log_every", "save_every",
+        "max_length", "log_every", "save_every",
     }
     assert {key: value for key, value in pilot.items() if key not in permitted_changes} == {
         key: value for key, value in full.items() if key not in permitted_changes
     }
     assert "train_bundle_limit" not in full
     assert "validation_bundle_limit" not in full
+    assert full["max_length"] == 5_376
+    assert full["max_length"] > pilot["max_length"]

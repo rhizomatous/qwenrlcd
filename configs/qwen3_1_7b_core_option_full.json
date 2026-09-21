@@ -5,7 +5,7 @@
   "validation_reference_bundle_limit": 500,
   "output_dir": "outputs/qwen3-1.7b-core-option-full-v0",
   "seed": 17,
-  "max_length": 4096,
+  "max_length": 5376,
   "max_questions": 32,
   "max_choices": 255,
   "require_no_state_truncation": true,
