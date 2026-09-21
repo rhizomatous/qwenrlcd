@@ -25,6 +25,9 @@ def test_preflight_reports_lengths_and_sources() -> None:
     assert report["question_count_max"] == 3
     assert report["over_max_length"] == 0
     assert report["packed_tokens"]["max"] > 0
+    assert report["total_packed_tokens"] == report["packed_tokens"]["max"]
+    assert report["mean_packed_tokens"] == report["packed_tokens"]["max"]
+    assert report["total_dense_attention_pairs"] == report["packed_tokens"]["max"] ** 2
     packed = DecisionDataset(
         [bundle], tokenizer, max_length=512, max_choices=255,
         max_questions=32, shuffle=False, seed=17,

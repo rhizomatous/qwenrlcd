@@ -31,7 +31,10 @@ def inspect_token_lengths(
     packed_lengths: list[int] = []
     question_counts: list[int] = []
     source_counts: Counter[str] = Counter()
-    over_budget: list[dict[str, Any]] = []
+    over_budget_count = 0
+    over_budget_examples: list[dict[str, Any]] = []
+    total_packed_tokens = 0
+    total_dense_attention_pairs = 0
     for bundle in bundles:
         if len(bundle.questions) > max_questions:
             raise ValueError(f"bundle {bundle.id} exceeds max_questions={max_questions}")
@@ -48,15 +51,22 @@ def inspect_token_lengths(
         )
         packed_length = state_length + branch_length
         packed_lengths.append(packed_length)
+        total_packed_tokens += packed_length
+        total_dense_attention_pairs += packed_length**2
         question_counts.append(len(bundle.questions))
         source_counts[bundle.source or "unspecified"] += 1
         if packed_length > max_length:
-            over_budget.append(
-                {"id": bundle.id, "source": bundle.source, "tokens": packed_length}
-            )
+            over_budget_count += 1
+            if len(over_budget_examples) < 5:
+                over_budget_examples.append(
+                    {"id": bundle.id, "source": bundle.source, "tokens": packed_length}
+                )
     packed_lengths.sort()
     return {
         "bundles": len(bundles),
+        "total_packed_tokens": total_packed_tokens,
+        "mean_packed_tokens": total_packed_tokens / len(bundles),
+        "total_dense_attention_pairs": total_dense_attention_pairs,
         "source_counts": dict(sorted(source_counts.items())),
         "question_count_max": max(question_counts),
         "packed_tokens": {
@@ -66,13 +76,13 @@ def inspect_token_lengths(
             "p99": _percentile(packed_lengths, 0.99),
             "max": packed_lengths[-1],
         },
-        "over_max_length": len(over_budget),
-        "over_max_length_examples": over_budget[:5],
+        "over_max_length": over_budget_count,
+        "over_max_length_examples": over_budget_examples,
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inspect pilot token lengths without a GPU")
+    parser = argparse.ArgumentParser(description="Inspect training token lengths without a GPU")
     parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args()
     config = load_config(args.config)
@@ -83,6 +93,7 @@ def main() -> None:
         config["model_id"], trust_remote_code=bool(config.get("trust_remote_code", True))
     )
     failed = False
+    summaries = {}
     for split in ("train", "validation"):
         summary = inspect_token_lengths(
             load_configured_bundles(config, split),
@@ -91,10 +102,28 @@ def main() -> None:
             max_questions=int(config["max_questions"]),
             max_choices=int(config["max_choices"]),
         )
+        summaries[split] = summary
         print(split, json.dumps(summary, sort_keys=True))
         failed |= summary["over_max_length"] > 0
+    micro_batch_size = int(config["micro_batch_size"])
+    accumulation = int(config["gradient_accumulation_steps"])
+    epochs = int(config["epochs"])
+    train_batches = math.ceil(summaries["train"]["bundles"] / micro_batch_size)
+    validation_batches = math.ceil(
+        summaries["validation"]["bundles"] / micro_batch_size
+    )
+    work = {
+        "epochs": epochs,
+        "micro_batch_size": micro_batch_size,
+        "gradient_accumulation_steps": accumulation,
+        "effective_batch_size": micro_batch_size * accumulation,
+        "train_batches_per_epoch": train_batches,
+        "optimizer_steps": math.ceil(train_batches / accumulation) * epochs,
+        "validation_batches_per_evaluation": validation_batches,
+    }
+    print("work", json.dumps(work, sort_keys=True))
     if failed:
-        raise SystemExit("pilot has bundles exceeding max_length; do not train with truncation")
+        raise SystemExit("dataset has bundles exceeding max_length; do not train with truncation")
 
 
 if __name__ == "__main__":

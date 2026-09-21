@@ -4,10 +4,18 @@ import argparse
 import json
 import math
 import random
+import time
 from pathlib import Path
 from typing import Any
 
 from .metrics import summarize_validation
+
+
+def format_duration(seconds: float) -> str:
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{remaining_seconds:02d}"
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -313,6 +321,31 @@ def main() -> None:
                 )
         accelerator.wait_for_everyone()
 
+    session_start_step = global_step
+    session_started_at = time.perf_counter()
+    non_training_seconds = 0.0
+
+    def record_training_timing() -> dict[str, float | int] | None:
+        completed = global_step - session_start_step
+        if completed < 1:
+            return None
+        elapsed = time.perf_counter() - session_started_at - non_training_seconds
+        seconds_per_step = elapsed / completed
+        timing: dict[str, float | int] = {
+            "session_start_step": session_start_step,
+            "current_step": global_step,
+            "total_steps": total_steps,
+            "steps_completed_this_session": completed,
+            "training_seconds_this_session": elapsed,
+            "seconds_per_optimizer_step": seconds_per_step,
+            "remaining_training_seconds": (total_steps - global_step) * seconds_per_step,
+        }
+        if accelerator.is_main_process:
+            (output_dir / "training_timing.json").write_text(
+                json.dumps(timing, indent=2) + "\n", encoding="utf-8"
+            )
+        return timing
+
     model.train()
     for epoch in range(start_epoch, int(config["epochs"])):
         train_dataset.set_epoch(epoch)
@@ -355,12 +388,17 @@ def main() -> None:
             if accelerator.sync_gradients:
                 global_step += 1
                 if global_step % int(config["log_every"]) == 0:
+                    timing = record_training_timing()
+                    assert timing is not None
                     accelerator.print(
                         f"epoch={epoch} step={global_step}/{total_steps} "
                         f"loss={losses.total.item():.4f} "
                         f"ce={losses.cross_entropy.item():.4f} "
                         f"brier={losses.brier.item():.4f} "
-                        f"score_rps={losses.ordinal_rps.item():.4f}"
+                        f"score_rps={losses.ordinal_rps.item():.4f} "
+                        f"step_s={timing['seconds_per_optimizer_step']:.3f} "
+                        "train_eta="
+                        f"{format_duration(float(timing['remaining_training_seconds']))}"
                     )
                 should_stop = (
                     args.stop_after_step is not None
@@ -369,6 +407,15 @@ def main() -> None:
                 if should_stop or (
                     global_step % save_every == 0 and global_step < total_steps
                 ):
+                    if should_stop and global_step % int(config["log_every"]) != 0:
+                        timing = record_training_timing()
+                        assert timing is not None
+                        accelerator.print(
+                            f"timing step={global_step}/{total_steps} "
+                            f"step_s={timing['seconds_per_optimizer_step']:.3f} "
+                            "train_eta="
+                            f"{format_duration(float(timing['remaining_training_seconds']))}"
+                        )
                     save_checkpoint(epoch, batch_index + 1)
                 if should_stop:
                     accelerator.print(
@@ -383,6 +430,8 @@ def main() -> None:
         if (epoch + 1) % validation_every_epochs != 0 and not is_final_epoch:
             continue
 
+        final_training_timing = record_training_timing()
+        validation_started_at = time.perf_counter()
         model.eval()
         local_validation: list[dict[str, Any]] = []
         with torch.no_grad():
@@ -469,6 +518,17 @@ def main() -> None:
                 for key in ("epoch", "step", "loss", "accuracy", "brier", "nll", "ece")
             )
         )
+        validation_seconds = time.perf_counter() - validation_started_at
+        non_training_seconds += validation_seconds
+        accelerator.print(
+            f"validation_time={format_duration(validation_seconds)}"
+        )
+        if is_final_epoch and final_training_timing is not None:
+            accelerator.print(
+                "training_time="
+                f"{format_duration(float(final_training_timing['training_seconds_this_session']))} "
+                f"session_steps={final_training_timing['steps_completed_this_session']}"
+            )
         model.train()
 
     accelerator.wait_for_everyone()
