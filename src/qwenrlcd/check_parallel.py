@@ -14,6 +14,16 @@ def main() -> None:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--config", type=Path)
     source.add_argument("--run-dir", type=Path)
+    parser.add_argument(
+        "--attn-implementation",
+        choices=("eager", "sdpa"),
+        help="Override the saved/configured attention backend",
+    )
+    parser.add_argument(
+        "--compare-attn-implementation",
+        choices=("eager", "sdpa"),
+        help="Also require matching logits from this second backend",
+    )
     parser.add_argument("--atol", type=float, default=0.0001)
     parser.add_argument("--rtol", type=float, default=0.0001)
     args = parser.parse_args()
@@ -21,11 +31,17 @@ def main() -> None:
         args.config if args.config is not None else args.run_dir / "training_config.json"
     )
     config = load_config(config_path)
+    attention_backend = args.attn_implementation or config.get(
+        "attn_implementation", "eager"
+    )
+    if args.compare_attn_implementation == attention_backend:
+        parser.error("comparison attention backend must differ from the primary backend")
 
     import torch
     from transformers import AutoTokenizer
 
-    from .data import DecisionCollator, DecisionDataset, read_jsonl
+    from .data import DecisionCollator, DecisionDataset
+    from .hf_data import load_configured_bundles
     from .model import DecisionModel
 
     if not torch.cuda.is_available():
@@ -44,32 +60,39 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    if args.run_dir is not None:
-        model = DecisionModel.load_components(
-            args.run_dir / "final",
-            model_id=config["model_id"],
-            dtype=torch.float32,
-            trust_remote_code=bool(config.get("trust_remote_code", True)),
-            attn_implementation=config.get("attn_implementation", "eager"),
-        )
-    else:
-        model = DecisionModel.from_pretrained(
-            config["model_id"],
-            max_choices=int(config["max_choices"]),
-            dtype=torch.float32,
-            trust_remote_code=bool(config.get("trust_remote_code", True)),
-            attn_implementation=config.get("attn_implementation", "eager"),
-        )
-        lora = config.get("lora", {})
-        if lora.get("enabled", True):
-            model.attach_lora(
-                rank=int(lora["rank"]),
-                alpha=int(lora["alpha"]),
-                dropout=float(lora["dropout"]),
-                target_modules=lora["target_modules"],
+    def load_model(backend: str) -> DecisionModel:
+        if args.run_dir is not None:
+            loaded = DecisionModel.load_components(
+                args.run_dir / "final",
+                model_id=config["model_id"],
+                dtype=torch.float32,
+                trust_remote_code=bool(config.get("trust_remote_code", True)),
+                attn_implementation=backend,
             )
-    model = model.cuda()
-    model.eval()
+        else:
+            # Re-seed every load so a backend comparison starts from identical
+            # randomly initialized decision-head and LoRA weights.
+            torch.manual_seed(int(config["seed"]))
+            loaded = DecisionModel.from_pretrained(
+                config["model_id"],
+                max_choices=int(config["max_choices"]),
+                dtype=torch.float32,
+                trust_remote_code=bool(config.get("trust_remote_code", True)),
+                attn_implementation=backend,
+            )
+            lora = config.get("lora", {})
+            if lora.get("enabled", True):
+                loaded.attach_lora(
+                    rank=int(lora["rank"]),
+                    alpha=int(lora["alpha"]),
+                    dropout=float(lora["dropout"]),
+                    target_modules=lora["target_modules"],
+                )
+        loaded = loaded.cuda()
+        loaded.eval()
+        return loaded
+
+    model = load_model(attention_backend)
 
     collator = DecisionCollator(
         tokenizer,
@@ -77,7 +100,9 @@ def main() -> None:
         max_questions=int(config["max_questions"]),
     )
 
-    def run(bundles: list[DecisionBundle]) -> tuple[torch.Tensor, list[list[str | None]]]:
+    def run(
+        selected_model: DecisionModel, bundles: list[DecisionBundle]
+    ) -> tuple[torch.Tensor, list[list[str | None]]]:
         dataset = DecisionDataset(
             bundles,
             tokenizer,
@@ -89,7 +114,7 @@ def main() -> None:
         )
         batch = collator([dataset[index] for index in range(len(dataset))])
         with torch.inference_mode():
-            logits = model(
+            logits = selected_model(
                 input_ids=batch["input_ids"].cuda(),
                 position_ids=batch["position_ids"].cuda(),
                 tree_attention_mask=batch["tree_attention_mask"].cuda(),
@@ -97,9 +122,10 @@ def main() -> None:
             )
         return logits.float().cpu(), batch["question_ids"]
 
+    validation_bundles = load_configured_bundles(config, "validation")
     bundle = next(
         (
-            candidate for candidate in read_jsonl(config["validation_file"])
+            candidate for candidate in validation_bundles
             if len(candidate.questions) >= 2
             and any(question.type is QuestionType.CHOICE for question in candidate.questions)
         ),
@@ -108,14 +134,14 @@ def main() -> None:
     if bundle is None:
         raise SystemExit("parallelism check requires a multi-question Choice bundle")
 
-    bundled_logits, bundled_ids = run([bundle])
+    bundled_logits, bundled_ids = run(model, [bundle])
     singletons = [
         DecisionBundle(f"{bundle.id}-{question.id}", bundle.state, (question,))
         for question in bundle.questions
     ]
-    singleton_logits, singleton_ids = run(singletons)
+    singleton_logits, singleton_ids = run(model, singletons)
     reversed_bundle = DecisionBundle(bundle.id, bundle.state, tuple(reversed(bundle.questions)))
-    reversed_logits, reversed_ids = run([reversed_bundle])
+    reversed_logits, reversed_ids = run(model, [reversed_bundle])
     choice = next(q for q in bundle.questions if q.type is QuestionType.CHOICE)
     flipped_question = Question(
         choice.id, choice.type, choice.instructions,
@@ -126,7 +152,7 @@ def main() -> None:
         tuple(flipped_question if q.id == choice.id else q for q in bundle.questions),
         bundle.source,
     )
-    flipped_logits, flipped_ids = run([flipped_bundle])
+    flipped_logits, flipped_ids = run(model, [flipped_bundle])
 
     bundled_by_id = {
         question_id: bundled_logits[0, index]
@@ -173,6 +199,7 @@ def main() -> None:
     )
 
     print("parallel invariance diagnostics", flush=True)
+    print(f"attention_backend={attention_backend}", flush=True)
     print("precision=float32 tf32=false", flush=True)
     print(f"questions={len(bundle.questions)}", flush=True)
     print(f"max_singleton_logit_delta={max_singleton_delta:.6f}", flush=True)
@@ -186,6 +213,37 @@ def main() -> None:
         flipped_choice_logits, original_choice_logits, atol=args.atol, rtol=args.rtol
     )
     print("parallel invariance passed")
+
+    if args.compare_attn_implementation is not None:
+        comparison_model = load_model(args.compare_attn_implementation)
+        comparison_cases = (
+            ("bundled", [bundle], bundled_logits),
+            ("singletons", singletons, singleton_logits),
+            ("questions_reordered", [reversed_bundle], reversed_logits),
+            ("options_reordered", [flipped_bundle], flipped_logits),
+        )
+        max_backend_delta = 0.0
+        for _, case_bundles, primary_logits in comparison_cases:
+            comparison_logits, _ = run(comparison_model, case_bundles)
+            for row, case_bundle in enumerate(case_bundles):
+                for question_index, question in enumerate(case_bundle.questions):
+                    choice_count = len(question.options)
+                    primary = primary_logits[row, question_index, :choice_count]
+                    comparison = comparison_logits[row, question_index, :choice_count]
+                    max_backend_delta = max(
+                        max_backend_delta,
+                        float((primary - comparison).abs().max()),
+                    )
+                    torch.testing.assert_close(
+                        comparison, primary, atol=args.atol, rtol=args.rtol
+                    )
+        print(
+            "attention backend equivalence passed "
+            f"primary={attention_backend} "
+            f"comparison={args.compare_attn_implementation} "
+            f"max_logit_delta={max_backend_delta:.6f}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

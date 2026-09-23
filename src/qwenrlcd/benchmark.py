@@ -162,20 +162,20 @@ def _benchmark_mode(
     )
     padded_tokens = sum(batch["input_ids"].numel() for batch in cpu_batches)
 
-    def forward_all() -> list[Any]:
-        return [model(**batch) for batch in batches]
+    def forward_all(gpu_batches: list[dict[str, Any]]) -> list[Any]:
+        return [model(**batch) for batch in gpu_batches]
 
     timings_ms = []
     first_logits: list[list[float]] | None = None
     with torch.inference_mode():
         for _ in range(warmups):
-            outputs = forward_all()
+            outputs = forward_all(batches)
             del outputs
         torch.cuda.synchronize()
         for _ in range(repeats):
             torch.cuda.synchronize()
             start = time.perf_counter()
-            outputs = forward_all()
+            outputs = forward_all(batches)
             torch.cuda.synchronize()
             timings_ms.append(1000 * (time.perf_counter() - start))
             if first_logits is None:
@@ -220,6 +220,11 @@ def main() -> None:
     parser.add_argument("--singleton-batch-size", type=int, default=28)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument(
+        "--attn-implementation",
+        choices=("eager", "sdpa"),
+        help="Override the attention backend saved in the training config",
+    )
     args = parser.parse_args()
     try:
         question_counts = parse_positive_ints(args.question_counts)
@@ -231,9 +236,6 @@ def main() -> None:
     if min(args.singleton_batch_size, args.repeats) < 1 or args.warmups < 0:
         parser.error("batch size and repeats must be positive; warmups cannot be negative")
 
-    output_path = args.output or args.run_dir / "parallel_speed_benchmark.json"
-    if output_path.exists():
-        parser.error(f"refusing to overwrite existing benchmark: {output_path}")
     if not (args.run_dir / "final" / "decision_head.pt").is_file():
         parser.error(f"no saved decision model in {args.run_dir / 'final'}")
 
@@ -246,6 +248,18 @@ def main() -> None:
     if not torch.cuda.is_available():
         parser.error("a CUDA GPU is required for this latency benchmark")
     config = load_config(args.run_dir / "training_config.json")
+    attention_backend = args.attn_implementation or config.get(
+        "attn_implementation", "eager"
+    )
+    output_path = args.output or (
+        args.run_dir / (
+            "parallel_speed_benchmark.json"
+            if args.attn_implementation is None
+            else f"parallel_speed_benchmark_{attention_backend}.json"
+        )
+    )
+    if output_path.exists():
+        parser.error(f"refusing to overwrite existing benchmark: {output_path}")
     if max(question_counts) > int(config["max_questions"]):
         parser.error("question count exceeds saved model configuration")
     tokenizer_dir = args.run_dir / "tokenizer"
@@ -262,7 +276,7 @@ def main() -> None:
         model_id=config["model_id"],
         dtype=dtype,
         trust_remote_code=bool(config.get("trust_remote_code", True)),
-        attn_implementation=config.get("attn_implementation", "eager"),
+        attn_implementation=attention_backend,
     ).to("cuda")
     model.eval()
     torch.cuda.synchronize()
@@ -272,6 +286,7 @@ def main() -> None:
         "gpu": torch.cuda.get_device_name(),
         "torch": torch.__version__,
         "dtype": str(dtype),
+        "attn_implementation": attention_backend,
         "method": (
             "pretokenized GPU-resident inputs for synchronous model-only latency; "
             "peak memory measured with one forward's input resident at a time"
@@ -283,7 +298,8 @@ def main() -> None:
         "cases": [],
     }
     print(
-        f"GPU={report['gpu']} dtype={report['dtype']} repeats={args.repeats} "
+        f"GPU={report['gpu']} dtype={report['dtype']} "
+        f"attention_backend={attention_backend} repeats={args.repeats} "
         f"warmups={args.warmups} singleton_batch_size={args.singleton_batch_size}",
         flush=True,
     )
