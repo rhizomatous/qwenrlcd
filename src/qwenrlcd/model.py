@@ -7,6 +7,66 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from .data import (
+    TOKEN_ROLE_OPTION,
+    TOKEN_ROLE_PADDING,
+    TOKEN_ROLE_QUESTION,
+    TOKEN_ROLE_STATE,
+)
+
+
+def tree_attention_from_labels(
+    token_roles: torch.Tensor,
+    token_question_indices: torch.Tensor,
+    token_option_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Materialize the exact tree topology represented by compact token labels."""
+    if not (
+        token_roles.ndim == 2
+        and token_roles.shape == token_question_indices.shape == token_option_indices.shape
+    ):
+        raise ValueError("compact topology tensors must share shape [batch, sequence]")
+    sequence_length = token_roles.shape[1]
+    positions = torch.arange(sequence_length, device=token_roles.device)
+    query_position = positions[None, :, None]
+    key_position = positions[None, None, :]
+    causal = key_position <= query_position
+
+    query_role = token_roles[:, :, None]
+    key_role = token_roles[:, None, :]
+    query_question = token_question_indices[:, :, None]
+    key_question = token_question_indices[:, None, :]
+    query_option = token_option_indices[:, :, None]
+    key_option = token_option_indices[:, None, :]
+    same_question = query_question == key_question
+    same_option = query_option == key_option
+
+    state_query = (
+        (query_role == TOKEN_ROLE_STATE)
+        & (key_role == TOKEN_ROLE_STATE)
+        & causal
+    )
+    question_query = (query_role == TOKEN_ROLE_QUESTION) & (
+        (key_role == TOKEN_ROLE_STATE)
+        | ((key_role == TOKEN_ROLE_QUESTION) & same_question & causal)
+    )
+    option_query = (query_role == TOKEN_ROLE_OPTION) & (
+        (key_role == TOKEN_ROLE_STATE)
+        | ((key_role == TOKEN_ROLE_QUESTION) & same_question)
+        | (
+            (key_role == TOKEN_ROLE_OPTION)
+            & same_question
+            & same_option
+            & causal
+        )
+    )
+    padding_query = (
+        (query_role == TOKEN_ROLE_PADDING)
+        & (key_role == TOKEN_ROLE_PADDING)
+        & (key_position == query_position)
+    )
+    return state_query | question_query | option_query | padding_query
+
 
 class DecisionModel(nn.Module):
     """Qwen3 with isolated option branches and one shared scalar scorer."""
@@ -18,12 +78,16 @@ class DecisionModel(nn.Module):
         max_choices: int = 255,
         base_model_id: str | None = None,
         attn_implementation: str = "eager",
+        flex_block_size: int = 128,
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.max_choices = max_choices
         self.base_model_id = base_model_id
         self.attn_implementation = attn_implementation
+        if flex_block_size not in (64, 128):
+            raise ValueError("flex_block_size must be 64 or 128")
+        self.flex_block_size = flex_block_size
         self.decision_head = nn.Linear(hidden_size, 1)
 
     @classmethod
@@ -35,6 +99,7 @@ class DecisionModel(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
         trust_remote_code: bool = True,
         attn_implementation: str = "eager",
+        flex_block_size: int = 128,
     ) -> DecisionModel:
         from transformers import AutoModelForCausalLM
 
@@ -63,6 +128,7 @@ class DecisionModel(nn.Module):
             max_choices=max_choices,
             base_model_id=model_id,
             attn_implementation=attn_implementation,
+            flex_block_size=flex_block_size,
         )
         del causal_lm
         return model
@@ -76,6 +142,7 @@ class DecisionModel(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
         trust_remote_code: bool = True,
         attn_implementation: str = "eager",
+        flex_block_size: int | None = None,
         is_trainable: bool = False,
     ) -> DecisionModel:
         source = Path(input_dir)
@@ -94,6 +161,11 @@ class DecisionModel(nn.Module):
             dtype=dtype,
             trust_remote_code=trust_remote_code,
             attn_implementation=attn_implementation,
+            flex_block_size=int(
+                flex_block_size
+                if flex_block_size is not None
+                else decision_config.get("flex_block_size", 128)
+            ),
         )
 
         adapter_dir = source / "backbone"
@@ -144,33 +216,118 @@ class DecisionModel(nn.Module):
         *,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        tree_attention_mask: torch.Tensor,
         decision_indices: torch.Tensor,
+        tree_attention_mask: torch.Tensor | None = None,
+        token_roles: torch.Tensor | None = None,
+        token_question_indices: torch.Tensor | None = None,
+        token_option_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if decision_indices.ndim != 3:
             raise ValueError("decision_indices must have shape [batch, questions, choices]")
+        compact_tensors = (
+            token_roles,
+            token_question_indices,
+            token_option_indices,
+        )
+        has_compact_topology = all(tensor is not None for tensor in compact_tensors)
+        if not has_compact_topology and any(tensor is not None for tensor in compact_tensors):
+            raise ValueError("all three compact topology tensors must be supplied together")
+        if tree_attention_mask is None and not has_compact_topology:
+            raise ValueError("either a dense tree mask or compact topology labels are required")
+
         if self.attn_implementation == "flex_attention":
             from torch.nn.attention.flex_attention import create_block_mask
 
-            def tree_mask_mod(
-                batch_index: torch.Tensor,
-                _head_index: torch.Tensor,
-                query_index: torch.Tensor,
-                key_index: torch.Tensor,
-            ) -> torch.Tensor:
-                return tree_attention_mask[batch_index, query_index, key_index]
+            if has_compact_topology:
+                assert token_roles is not None
+                assert token_question_indices is not None
+                assert token_option_indices is not None
 
-            sequence_length = tree_attention_mask.shape[-1]
+                def tree_mask_mod(
+                    batch_index: torch.Tensor,
+                    _head_index: torch.Tensor,
+                    query_index: torch.Tensor,
+                    key_index: torch.Tensor,
+                ) -> torch.Tensor:
+                    query_role = token_roles[batch_index, query_index]
+                    key_role = token_roles[batch_index, key_index]
+                    same_question = (
+                        token_question_indices[batch_index, query_index]
+                        == token_question_indices[batch_index, key_index]
+                    )
+                    same_option = (
+                        token_option_indices[batch_index, query_index]
+                        == token_option_indices[batch_index, key_index]
+                    )
+                    causal = key_index <= query_index
+                    return (
+                        (
+                            (query_role == TOKEN_ROLE_STATE)
+                            & (key_role == TOKEN_ROLE_STATE)
+                            & causal
+                        )
+                        | (
+                            (query_role == TOKEN_ROLE_QUESTION)
+                            & (
+                                (key_role == TOKEN_ROLE_STATE)
+                                | ((key_role == TOKEN_ROLE_QUESTION) & same_question & causal)
+                            )
+                        )
+                        | (
+                            (query_role == TOKEN_ROLE_OPTION)
+                            & (
+                                (key_role == TOKEN_ROLE_STATE)
+                                | ((key_role == TOKEN_ROLE_QUESTION) & same_question)
+                                | (
+                                    (key_role == TOKEN_ROLE_OPTION)
+                                    & same_question
+                                    & same_option
+                                    & causal
+                                )
+                            )
+                        )
+                        | (
+                            (query_role == TOKEN_ROLE_PADDING)
+                            & (key_role == TOKEN_ROLE_PADDING)
+                            & (key_index == query_index)
+                        )
+                    )
+
+                sequence_length = token_roles.shape[-1]
+                batch_size = token_roles.shape[0]
+                device = token_roles.device
+            else:
+                assert tree_attention_mask is not None
+
+                def tree_mask_mod(
+                    batch_index: torch.Tensor,
+                    _head_index: torch.Tensor,
+                    query_index: torch.Tensor,
+                    key_index: torch.Tensor,
+                ) -> torch.Tensor:
+                    return tree_attention_mask[batch_index, query_index, key_index]
+
+                sequence_length = tree_attention_mask.shape[-1]
+                batch_size = tree_attention_mask.shape[0]
+                device = tree_attention_mask.device
             attention_mask = create_block_mask(
                 tree_mask_mod,
-                B=tree_attention_mask.shape[0],
+                B=batch_size,
                 H=None,
                 Q_LEN=sequence_length,
                 KV_LEN=sequence_length,
-                device=tree_attention_mask.device,
+                device=device,
+                BLOCK_SIZE=self.flex_block_size,
                 _compile=True,
             )
         else:
+            if tree_attention_mask is None:
+                assert token_roles is not None
+                assert token_question_indices is not None
+                assert token_option_indices is not None
+                tree_attention_mask = tree_attention_from_labels(
+                    token_roles, token_question_indices, token_option_indices
+                )
             mask_dtype = next(self.backbone.parameters()).dtype
             attention_mask = torch.zeros(
                 (*tree_attention_mask.shape[:1], 1, *tree_attention_mask.shape[1:]),
@@ -214,6 +371,7 @@ class DecisionModel(nn.Module):
                     "base_model_id": self.base_model_id,
                     "attention_topology": "causal_state_question_option_tree",
                     "head_architecture": "per_option",
+                    "flex_block_size": self.flex_block_size,
                 },
                 indent=2,
             )

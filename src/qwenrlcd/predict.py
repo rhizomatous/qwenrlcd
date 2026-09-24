@@ -26,7 +26,12 @@ def main() -> None:
     from torch.utils.data import DataLoader
     from transformers import AutoTokenizer
 
-    from .data import DecisionCollator, DecisionDataset, read_jsonl
+    from .data import (
+        DecisionCollator,
+        DecisionDataset,
+        decision_model_inputs,
+        read_jsonl,
+    )
     from .losses import mask_invalid_choices
     from .model import DecisionModel
     from .prediction import format_bundle_prediction
@@ -56,6 +61,10 @@ def main() -> None:
         max_length=int(config["max_length"]),
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
+        compact_attention_topology=(
+            bool(config.get("compact_attention_topology", False))
+            or config.get("attn_implementation", "eager") == "flex_attention"
+        ),
         shuffle=False,
         seed=int(config["seed"]),
         require_targets=False,
@@ -78,6 +87,7 @@ def main() -> None:
         dtype=dtype,
         trust_remote_code=bool(config.get("trust_remote_code", True)),
         attn_implementation=config.get("attn_implementation", "eager"),
+        flex_block_size=int(config.get("flex_block_size", 128)),
     ).to(device)
     model.eval()
 
@@ -86,12 +96,7 @@ def main() -> None:
     try:
         with torch.inference_mode():
             for batch in dataloader:
-                logits = model(
-                    input_ids=batch["input_ids"].to(device),
-                    position_ids=batch["position_ids"].to(device),
-                    tree_attention_mask=batch["tree_attention_mask"].to(device),
-                    decision_indices=batch["decision_indices"].to(device),
-                )
+                logits = model(**decision_model_inputs(batch, device))
                 probabilities = torch.softmax(
                     mask_invalid_choices(logits.float(), batch["num_choices"].to(device)),
                     dim=-1,

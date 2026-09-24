@@ -24,6 +24,7 @@ def main() -> None:
         choices=("eager", "sdpa", "flex_attention"),
         help="Also require matching logits from this second backend",
     )
+    parser.add_argument("--flex-block-size", type=int, choices=(64, 128), default=128)
     parser.add_argument("--atol", type=float, default=0.0001)
     parser.add_argument("--rtol", type=float, default=0.0001)
     args = parser.parse_args()
@@ -40,7 +41,7 @@ def main() -> None:
     import torch
     from transformers import AutoTokenizer
 
-    from .data import DecisionCollator, DecisionDataset
+    from .data import DecisionCollator, DecisionDataset, decision_model_inputs
     from .hf_data import load_configured_bundles
     from .model import DecisionModel
 
@@ -68,6 +69,7 @@ def main() -> None:
                 dtype=torch.float32,
                 trust_remote_code=bool(config.get("trust_remote_code", True)),
                 attn_implementation=backend,
+                flex_block_size=args.flex_block_size,
             )
         else:
             # Re-seed every load so a backend comparison starts from identical
@@ -79,6 +81,7 @@ def main() -> None:
                 dtype=torch.float32,
                 trust_remote_code=bool(config.get("trust_remote_code", True)),
                 attn_implementation=backend,
+                flex_block_size=args.flex_block_size,
             )
             lora = config.get("lora", {})
             if lora.get("enabled", True):
@@ -98,6 +101,10 @@ def main() -> None:
         tokenizer,
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
+        compact_attention_topology=(
+            attention_backend == "flex_attention"
+            or args.compare_attn_implementation == "flex_attention"
+        ),
     )
 
     def run(
@@ -114,12 +121,7 @@ def main() -> None:
         )
         batch = collator([dataset[index] for index in range(len(dataset))])
         with torch.inference_mode():
-            logits = selected_model(
-                input_ids=batch["input_ids"].cuda(),
-                position_ids=batch["position_ids"].cuda(),
-                tree_attention_mask=batch["tree_attention_mask"].cuda(),
-                decision_indices=batch["decision_indices"].cuda(),
-            )
+            logits = selected_model(**decision_model_inputs(batch, "cuda"))
         return logits.float().cpu(), batch["question_ids"]
 
     validation_bundles = load_configured_bundles(config, "validation")
@@ -200,6 +202,8 @@ def main() -> None:
 
     print("parallel invariance diagnostics", flush=True)
     print(f"attention_backend={attention_backend}", flush=True)
+    if attention_backend == "flex_attention":
+        print(f"flex_block_size={args.flex_block_size}", flush=True)
     print("precision=float32 tf32=false", flush=True)
     print(f"questions={len(bundle.questions)}", flush=True)
     print(f"max_singleton_logit_delta={max_singleton_delta:.6f}", flush=True)

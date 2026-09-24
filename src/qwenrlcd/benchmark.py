@@ -23,9 +23,6 @@ STATE_SENTENCE = (
     "The customer wrote that the replacement arrived today, but the original "
     "charge still appears on the account."
 )
-MODEL_INPUT_KEYS = (
-    "input_ids", "position_ids", "tree_attention_mask", "decision_indices"
-)
 
 
 def parse_positive_ints(value: str) -> tuple[int, ...]:
@@ -135,6 +132,7 @@ def _cpu_batches(
         tokenizer,
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
+        compact_attention_topology=bool(config.get("compact_attention_topology", False)),
     )
     bundled_packed = packed([bundled])
     singleton_packed = packed(singletons)
@@ -152,10 +150,9 @@ def _benchmark_mode(
     model: Any, cpu_batches: list[dict[str, Any]], *,
     torch: Any, warmups: int, repeats: int, model_bytes: int,
 ) -> tuple[dict[str, Any], list[list[float]]]:
-    batches = [
-        {key: batch[key].to("cuda") for key in MODEL_INPUT_KEYS}
-        for batch in cpu_batches
-    ]
+    from .data import decision_model_inputs
+
+    batches = [decision_model_inputs(batch, "cuda") for batch in cpu_batches]
     attention_positions = sum(
         batch["input_ids"].shape[0] * batch["input_ids"].shape[1] ** 2
         for batch in cpu_batches
@@ -190,7 +187,7 @@ def _benchmark_mode(
     peak_bytes = model_bytes
     with torch.inference_mode():
         for cpu_batch in cpu_batches:
-            batch = {key: cpu_batch[key].to("cuda") for key in MODEL_INPUT_KEYS}
+            batch = decision_model_inputs(cpu_batch, "cuda")
             torch.cuda.reset_peak_memory_stats()
             output = model(**batch)
             torch.cuda.synchronize()
@@ -225,6 +222,7 @@ def main() -> None:
         choices=("eager", "sdpa", "flex_attention"),
         help="Override the attention backend saved in the training config",
     )
+    parser.add_argument("--flex-block-size", type=int, choices=(64, 128), default=128)
     args = parser.parse_args()
     try:
         question_counts = parse_positive_ints(args.question_counts)
@@ -251,6 +249,13 @@ def main() -> None:
     attention_backend = args.attn_implementation or config.get(
         "attn_implementation", "eager"
     )
+    config = {
+        **config,
+        "compact_attention_topology": (
+            bool(config.get("compact_attention_topology", False))
+            or attention_backend == "flex_attention"
+        ),
+    }
     output_path = args.output or (
         args.run_dir / (
             "parallel_speed_benchmark.json"
@@ -277,6 +282,7 @@ def main() -> None:
         dtype=dtype,
         trust_remote_code=bool(config.get("trust_remote_code", True)),
         attn_implementation=attention_backend,
+        flex_block_size=args.flex_block_size,
     ).to("cuda")
     model.eval()
     torch.cuda.synchronize()
@@ -287,6 +293,7 @@ def main() -> None:
         "torch": torch.__version__,
         "dtype": str(dtype),
         "attn_implementation": attention_backend,
+        "flex_block_size": args.flex_block_size,
         "method": (
             "pretokenized GPU-resident inputs for synchronous model-only latency; "
             "peak memory measured with one forward's input resident at a time"

@@ -10,13 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from .benchmark import timing_summary
+from .data import DECISION_MODEL_INPUT_KEYS
 
-MODEL_INPUT_KEYS = (
-    "input_ids",
-    "position_ids",
-    "tree_attention_mask",
-    "decision_indices",
-)
 LOSS_INPUT_KEYS = (
     "targets",
     "num_choices",
@@ -232,7 +227,8 @@ def _run_case(
 
     batch = {
         key: cpu_batch[key].to("cuda", non_blocking=False)
-        for key in (*MODEL_INPUT_KEYS, *LOSS_INPUT_KEYS)
+        for key in (*DECISION_MODEL_INPUT_KEYS, *LOSS_INPUT_KEYS)
+        if key in cpu_batch
     }
 
     def prepare_iteration() -> None:
@@ -242,7 +238,9 @@ def _run_case(
 
     def forward_backward() -> tuple[Any, Any]:
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            logits = model(**{key: batch[key] for key in MODEL_INPUT_KEYS})
+            logits = model(
+                **{key: batch[key] for key in DECISION_MODEL_INPUT_KEYS if key in batch}
+            )
             losses = decision_loss(
                 logits,
                 batch["targets"],
@@ -347,6 +345,7 @@ def _run_backend(
     warmups: int,
     repeats: int,
     gradient_sample_count: int,
+    flex_block_size: int,
     torch: Any,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     from .model import DecisionModel
@@ -357,6 +356,7 @@ def _run_backend(
         dtype=torch.bfloat16,
         trust_remote_code=bool(config.get("trust_remote_code", True)),
         attn_implementation=backend,
+        flex_block_size=flex_block_size,
         is_trainable=True,
     )
     if config.get("gradient_checkpointing", True):
@@ -428,6 +428,7 @@ def main() -> None:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--gradient-sample-count", type=int, default=8)
+    parser.add_argument("--flex-block-size", type=int, choices=(64, 128), default=128)
     parser.add_argument("--loss-atol", type=float, default=0.01)
     parser.add_argument("--loss-rtol", type=float, default=0.01)
     parser.add_argument("--probability-atol", type=float, default=0.005)
@@ -438,6 +439,11 @@ def main() -> None:
         "--selection-report",
         type=Path,
         help="Reuse and validate row indices from an earlier benchmark instead of rescanning",
+    )
+    parser.add_argument(
+        "--allow-performance-failure",
+        action="store_true",
+        help="Write results and succeed when only the performance gate fails",
     )
     args = parser.parse_args()
     if args.warmups < 0 or min(args.repeats, args.gradient_sample_count) < 1:
@@ -506,6 +512,10 @@ def main() -> None:
         tokenizer,
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
+        compact_attention_topology=(
+            args.reference_backend == "flex_attention"
+            or args.candidate_backend == "flex_attention"
+        ),
     )
     cases = _build_cases(dataset, collator, selections)
     for case in cases:
@@ -527,6 +537,7 @@ def main() -> None:
             warmups=args.warmups,
             repeats=args.repeats,
             gradient_sample_count=args.gradient_sample_count,
+            flex_block_size=args.flex_block_size,
             torch=torch,
         )
 
@@ -615,6 +626,12 @@ def main() -> None:
         "dtype": "torch.bfloat16",
         "reference_backend": args.reference_backend,
         "candidate_backend": args.candidate_backend,
+        "flex_block_size": args.flex_block_size,
+        "attention_topology_input": (
+            "compact_token_labels"
+            if "flex_attention" in (args.reference_backend, args.candidate_backend)
+            else "dense_boolean_mask"
+        ),
         "method": (
             "same seeded epoch-0 real training batches; trainable saved LoRA and decision "
             "head; gradient checkpointing; autocast BF16; forward plus backward only; "
@@ -658,7 +675,7 @@ def main() -> None:
     )
     if not equivalence_passed:
         raise SystemExit(f"{args.candidate_backend} training equivalence gate failed")
-    if not performance_passed:
+    if not performance_passed and not args.allow_performance_failure:
         raise SystemExit(f"{args.candidate_backend} training performance gate failed")
 
 

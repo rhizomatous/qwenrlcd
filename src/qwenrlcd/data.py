@@ -13,6 +13,29 @@ from .formatting import (
 )
 from .schema import DecisionBundle, QuestionType
 
+TOKEN_ROLE_PADDING = 0
+TOKEN_ROLE_STATE = 1
+TOKEN_ROLE_QUESTION = 2
+TOKEN_ROLE_OPTION = 3
+
+DECISION_MODEL_INPUT_KEYS = (
+    "input_ids",
+    "position_ids",
+    "tree_attention_mask",
+    "token_roles",
+    "token_question_indices",
+    "token_option_indices",
+    "decision_indices",
+)
+
+
+def decision_model_inputs(batch: dict[str, Any], device: Any | None = None) -> dict[str, Any]:
+    """Select the topology tensors accepted by :class:`DecisionModel`."""
+    inputs = {key: batch[key] for key in DECISION_MODEL_INPUT_KEYS if key in batch}
+    if device is not None:
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+    return inputs
+
 
 def read_jsonl(path: str | Path) -> list[DecisionBundle]:
     bundles: list[DecisionBundle] = []
@@ -217,10 +240,18 @@ class DecisionDataset(Sequence[dict[str, Any]]):
 
 
 class DecisionCollator:
-    def __init__(self, tokenizer: Any, max_choices: int, max_questions: int) -> None:
+    def __init__(
+        self,
+        tokenizer: Any,
+        max_choices: int,
+        max_questions: int,
+        *,
+        compact_attention_topology: bool = False,
+    ) -> None:
         self.tokenizer = tokenizer
         self.max_choices = max_choices
         self.max_questions = max_questions
+        self.compact_attention_topology = compact_attention_topology
 
     def __call__(self, examples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         import torch
@@ -239,8 +270,19 @@ class DecisionCollator:
             (batch_size, max_sequence_length), pad_token_id, dtype=torch.long
         )
         position_ids = torch.zeros((batch_size, max_sequence_length), dtype=torch.long)
-        tree_attention_mask = torch.zeros(
-            (batch_size, max_sequence_length, max_sequence_length), dtype=torch.bool
+        tree_attention_mask = None
+        if not self.compact_attention_topology:
+            tree_attention_mask = torch.zeros(
+                (batch_size, max_sequence_length, max_sequence_length), dtype=torch.bool
+            )
+        token_roles = torch.full(
+            (batch_size, max_sequence_length), TOKEN_ROLE_PADDING, dtype=torch.int32
+        )
+        token_question_indices = torch.full(
+            (batch_size, max_sequence_length), -1, dtype=torch.int32
+        )
+        token_option_indices = torch.full(
+            (batch_size, max_sequence_length), -1, dtype=torch.int32
         )
         decision_indices = torch.zeros(
             (batch_size, question_slots, choice_slots), dtype=torch.long
@@ -259,14 +301,27 @@ class DecisionCollator:
             question_count = len(example["decision_indices"])
             input_ids[row, :sequence_length] = torch.tensor(example["input_ids"])
             position_ids[row, :sequence_length] = torch.tensor(example["position_ids"])
-            pattern = build_option_attention_pattern(
-                sequence_length, example["state_length"], example["option_tree_spans"]
-            )
-            tree_attention_mask[row, :sequence_length, :sequence_length] = torch.tensor(
-                pattern, dtype=torch.bool
-            )
-            for padding_index in range(sequence_length, max_sequence_length):
-                tree_attention_mask[row, padding_index, padding_index] = True
+            state_length = example["state_length"]
+            token_roles[row, :state_length] = TOKEN_ROLE_STATE
+            for question_index, (question_start, question_end, option_spans) in enumerate(
+                example["option_tree_spans"]
+            ):
+                token_roles[row, question_start:question_end] = TOKEN_ROLE_QUESTION
+                token_question_indices[row, question_start:question_end] = question_index
+                for option_index, (option_start, option_end) in enumerate(option_spans):
+                    token_roles[row, option_start:option_end] = TOKEN_ROLE_OPTION
+                    token_question_indices[row, option_start:option_end] = question_index
+                    token_option_indices[row, option_start:option_end] = option_index
+
+            if tree_attention_mask is not None:
+                pattern = build_option_attention_pattern(
+                    sequence_length, state_length, example["option_tree_spans"]
+                )
+                tree_attention_mask[row, :sequence_length, :sequence_length] = torch.tensor(
+                    pattern, dtype=torch.bool
+                )
+                for padding_index in range(sequence_length, max_sequence_length):
+                    tree_attention_mask[row, padding_index, padding_index] = True
 
             for question_index, indices in enumerate(example["decision_indices"]):
                 decision_indices[row, question_index, :len(indices)] = torch.tensor(
@@ -287,17 +342,22 @@ class DecisionCollator:
                 [question_type == QuestionType.SCORE.value for question_type in types]
             )
 
-        return {
+        batch = {
             "ids": [example["id"] for example in examples],
             "sources": [example["source"] for example in examples],
             "question_ids": question_ids,
             "question_types": question_types,
             "input_ids": input_ids,
             "position_ids": position_ids,
-            "tree_attention_mask": tree_attention_mask,
+            "token_roles": token_roles,
+            "token_question_indices": token_question_indices,
+            "token_option_indices": token_option_indices,
             "decision_indices": decision_indices,
             "num_choices": num_choices,
             "question_mask": question_mask,
             "score_mask": score_mask,
             "targets": targets,
         }
+        if tree_attention_mask is not None:
+            batch["tree_attention_mask"] = tree_attention_mask
+        return batch

@@ -90,7 +90,7 @@ def main() -> None:
         resolve_resume_checkpoint,
     )
     from .compact_checkpoint import register_compact_model_state_hooks
-    from .data import DecisionCollator, DecisionDataset
+    from .data import DecisionCollator, DecisionDataset, decision_model_inputs
     from .hf_data import load_configured_bundles
     from .losses import decision_loss
     from .model import DecisionModel
@@ -118,6 +118,10 @@ def main() -> None:
         tokenizer,
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
+        compact_attention_topology=(
+            bool(config.get("compact_attention_topology", False))
+            or config.get("attn_implementation", "eager") == "flex_attention"
+        ),
     )
     train_bundles = load_configured_bundles(config, "train")
     validation_bundles = load_configured_bundles(config, "validation")
@@ -177,6 +181,7 @@ def main() -> None:
         max_choices=int(config["max_choices"]),
         trust_remote_code=bool(config.get("trust_remote_code", True)),
         attn_implementation=config.get("attn_implementation", "eager"),
+        flex_block_size=int(config.get("flex_block_size", 128)),
     )
     if config.get("gradient_checkpointing", True):
         model.enable_gradient_checkpointing()
@@ -360,12 +365,7 @@ def main() -> None:
         for relative_batch_index, batch in enumerate(active_dataloader):
             batch_index = relative_batch_index + skipped_batches
             with accelerator.accumulate(model):
-                logits = model(
-                    input_ids=batch["input_ids"],
-                    position_ids=batch["position_ids"],
-                    tree_attention_mask=batch["tree_attention_mask"],
-                    decision_indices=batch["decision_indices"],
-                )
+                logits = model(**decision_model_inputs(batch))
                 losses = decision_loss(
                     logits,
                     batch["targets"],
@@ -436,12 +436,7 @@ def main() -> None:
         local_validation: list[dict[str, Any]] = []
         with torch.no_grad():
             for batch in validation_dataloader:
-                logits = model(
-                    input_ids=batch["input_ids"],
-                    position_ids=batch["position_ids"],
-                    tree_attention_mask=batch["tree_attention_mask"],
-                    decision_indices=batch["decision_indices"],
-                )
+                logits = model(**decision_model_inputs(batch))
                 losses = decision_loss(
                     logits,
                     batch["targets"],
@@ -540,10 +535,7 @@ def main() -> None:
         verification_batch = next(iter(validation_dataloader))
         with torch.inference_mode():
             reference_logits = unwrapped(
-                input_ids=verification_batch["input_ids"],
-                position_ids=verification_batch["position_ids"],
-                tree_attention_mask=verification_batch["tree_attention_mask"],
-                decision_indices=verification_batch["decision_indices"],
+                **decision_model_inputs(verification_batch)
             ).float()
 
         unwrapped.save_components(output_dir / "final")
@@ -558,14 +550,12 @@ def main() -> None:
             dtype=torch.bfloat16,
             trust_remote_code=bool(config.get("trust_remote_code", True)),
             attn_implementation=config.get("attn_implementation", "eager"),
+            flex_block_size=int(config.get("flex_block_size", 128)),
         ).to(accelerator.device)
         reloaded.eval()
         with torch.inference_mode():
             reloaded_logits = reloaded(
-                input_ids=verification_batch["input_ids"],
-                position_ids=verification_batch["position_ids"],
-                tree_attention_mask=verification_batch["tree_attention_mask"],
-                decision_indices=verification_batch["decision_indices"],
+                **decision_model_inputs(verification_batch)
             ).float()
         torch.testing.assert_close(
             reloaded_logits, reference_logits, atol=0.001, rtol=0.001

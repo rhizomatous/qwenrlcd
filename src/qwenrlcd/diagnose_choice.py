@@ -218,7 +218,7 @@ def predict_decision_rows(
     import torch
     from torch.utils.data import DataLoader
 
-    from .data import DecisionCollator, DecisionDataset
+    from .data import DecisionCollator, DecisionDataset, decision_model_inputs
     from .losses import mask_invalid_choices
 
     dataset = DecisionDataset(
@@ -239,18 +239,17 @@ def predict_decision_rows(
             tokenizer,
             max_choices=int(config["max_choices"]),
             max_questions=int(config["max_questions"]),
+            compact_attention_topology=(
+                bool(config.get("compact_attention_topology", False))
+                or config.get("attn_implementation", "eager") == "flex_attention"
+            ),
         ),
     )
     rows: list[dict[str, Any]] = []
     bundle_offset = 0
     with torch.inference_mode():
         for batch in dataloader:
-            logits = model(
-                input_ids=batch["input_ids"].to(device),
-                position_ids=batch["position_ids"].to(device),
-                tree_attention_mask=batch["tree_attention_mask"].to(device),
-                decision_indices=batch["decision_indices"].to(device),
-            )
+            logits = model(**decision_model_inputs(batch, device))
             probabilities = torch.softmax(
                 mask_invalid_choices(logits.float(), batch["num_choices"].to(device)),
                 dim=-1,
@@ -347,6 +346,7 @@ def main() -> None:
         dtype=dtype,
         trust_remote_code=bool(config.get("trust_remote_code", True)),
         attn_implementation=config.get("attn_implementation", "eager"),
+        flex_block_size=int(config.get("flex_block_size", 128)),
     ).to(device)
     model.eval()
 

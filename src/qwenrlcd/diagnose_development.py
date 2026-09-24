@@ -56,6 +56,7 @@ def main() -> None:
         dtype=dtype,
         trust_remote_code=bool(config.get("trust_remote_code", True)),
         attn_implementation=config.get("attn_implementation", "eager"),
+        flex_block_size=int(config.get("flex_block_size", 128)),
     ).to(device)
     model.eval()
 
