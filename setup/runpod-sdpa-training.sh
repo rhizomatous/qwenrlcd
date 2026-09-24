@@ -4,7 +4,12 @@ set -euo pipefail
 
 QWENRLCD_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 QWENRLCD_RUN_DIR="${1:-outputs/qwen3-1.7b-core-option-full-v0}"
-QWENRLCD_REPORT="$QWENRLCD_RUN_DIR/sdpa_training_benchmark.json"
+QWENRLCD_SELECTION_REPORT="$QWENRLCD_RUN_DIR/sdpa_training_benchmark.json"
+QWENRLCD_REPORT="$QWENRLCD_RUN_DIR/sdpa_training_probability_benchmark.json"
+QWENRLCD_SELECTION_ARGS=()
+if [ -f "$QWENRLCD_SELECTION_REPORT" ]; then
+  QWENRLCD_SELECTION_ARGS=(--selection-report "$QWENRLCD_SELECTION_REPORT")
+fi
 
 # shellcheck source=/dev/null
 source "$QWENRLCD_SETUP_DIR/runpod-activate.sh"
@@ -14,4 +19,5 @@ uv run pytest -q tests/test_benchmark_training.py tests/test_losses.py tests/tes
 
 uv run qwenrlcd-benchmark-training \
   --run-dir "$QWENRLCD_RUN_DIR" \
-  --output "$QWENRLCD_REPORT"
+  --output "$QWENRLCD_REPORT" \
+  "${QWENRLCD_SELECTION_ARGS[@]}"

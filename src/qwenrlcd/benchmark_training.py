@@ -23,6 +23,11 @@ LOSS_INPUT_KEYS = (
     "question_mask",
     "score_mask",
 )
+CASE_BATCH_SIZES = {
+    "median": 2,
+    "p95": 2,
+    "maximum": 1,
+}
 
 
 def quantile_rank(length: int, quantile: float) -> int:
@@ -67,6 +72,47 @@ def select_length_cases(lengths: Sequence[int]) -> list[dict[str, Any]]:
     return [selected_by_name[name] for name, _, _ in specifications]
 
 
+def reused_length_cases(report: dict[str, Any], dataset_length: int) -> list[dict[str, Any]]:
+    """Validate and recover benchmark row selections from an earlier report."""
+    raw_cases = report.get("selection")
+    if not isinstance(raw_cases, list):
+        raise ValueError("selection report has no selection list")
+    by_name = {
+        case.get("name"): case
+        for case in raw_cases
+        if isinstance(case, dict) and isinstance(case.get("name"), str)
+    }
+    if set(by_name) != set(CASE_BATCH_SIZES):
+        raise ValueError("selection report must contain median, p95, and maximum cases")
+    selections = []
+    used: set[int] = set()
+    for name in CASE_BATCH_SIZES:
+        case = by_name[name]
+        indices = case.get("indices")
+        if (
+            not isinstance(indices, list)
+            or len(indices) != CASE_BATCH_SIZES[name]
+            or any(isinstance(index, bool) or not isinstance(index, int) for index in indices)
+        ):
+            raise ValueError(f"selection report has invalid {name} indices")
+        if any(index < 0 or index >= dataset_length for index in indices):
+            raise ValueError(f"selection report has out-of-range {name} indices")
+        if used.intersection(indices):
+            raise ValueError("selection report reuses a dataset row")
+        used.update(indices)
+        selections.append(
+            {
+                "name": name,
+                "quantile": float(case["quantile"]),
+                "target_length": int(case["target_length"]),
+                "indices": indices,
+                "expected_ids": case.get("ids"),
+                "expected_lengths": case.get("individual_lengths"),
+            }
+        )
+    return selections
+
+
 def evenly_spaced_names(names: Sequence[str], count: int) -> list[str]:
     if count < 1:
         raise ValueError("count must be positive")
@@ -98,18 +144,28 @@ def _scan_training_lengths(dataset: Any) -> list[int]:
 def _build_cases(
     dataset: Any,
     collator: Any,
-    lengths: Sequence[int],
+    selections: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     cases = []
-    for selection in select_length_cases(lengths):
+    for selection in selections:
         examples = [dataset[index] for index in selection["indices"]]
         batch = collator(examples)
+        ids = list(batch["ids"])
+        individual_lengths = [len(example["input_ids"]) for example in examples]
+        if selection.get("expected_ids") not in (None, ids):
+            raise ValueError(f"reused {selection['name']} selection IDs changed")
+        if selection.get("expected_lengths") not in (None, individual_lengths):
+            raise ValueError(f"reused {selection['name']} packed lengths changed")
         cases.append(
             {
-                **selection,
-                "ids": list(batch["ids"]),
+                **{
+                    key: value
+                    for key, value in selection.items()
+                    if not key.startswith("expected_")
+                },
+                "ids": ids,
                 "sources": list(batch["sources"]),
-                "individual_lengths": [len(example["input_ids"]) for example in examples],
+                "individual_lengths": individual_lengths,
                 "padded_length": int(batch["input_ids"].shape[1]),
                 "questions": int(batch["question_mask"].sum().item()),
                 "batch": batch,
@@ -127,10 +183,24 @@ def _gradient_names(model: Any, sample_count: int) -> list[str]:
     return sorted(set(head + evenly_spaced_names(lora, sample_count)))
 
 
-def _valid_logits(logits: Any, batch: dict[str, Any], torch: Any) -> Any:
-    slots = torch.arange(logits.shape[-1], device=logits.device).view(1, 1, -1)
+def _valid_values(values: Any, batch: dict[str, Any], torch: Any) -> Any:
+    slots = torch.arange(values.shape[-1], device=values.device).view(1, 1, -1)
     valid = batch["question_mask"].unsqueeze(-1) & (slots < batch["num_choices"].unsqueeze(-1))
-    return logits.detach()[valid].float().cpu()
+    return values.detach()[valid].float().cpu()
+
+
+def _centered_valid_logits(logits: Any, batch: dict[str, Any], torch: Any) -> Any:
+    centered = []
+    for row in range(logits.shape[0]):
+        for question in range(logits.shape[1]):
+            if not bool(batch["question_mask"][row, question]):
+                continue
+            choice_count = int(batch["num_choices"][row, question])
+            values = logits[row, question, :choice_count].detach().float()
+            centered.append(values - values.mean())
+    if not centered:
+        raise ValueError("batch contains no valid question logits")
+    return torch.cat(centered).cpu()
 
 
 def _capture_gradients(model: Any, names: Sequence[str], torch: Any) -> dict[str, Any]:
@@ -209,7 +279,9 @@ def _run_case(
         peak_bytes = max(peak_bytes, torch.cuda.max_memory_allocated())
         if repeat == 0:
             capture = {
-                "logits": _valid_logits(logits, batch, torch),
+                "logits": _valid_values(logits, batch, torch),
+                "centered_logits": _centered_valid_logits(logits, batch, torch),
+                "probabilities": _valid_values(losses.probabilities, batch, torch),
                 "gradients": _capture_gradients(model, gradient_names, torch),
                 "loss": float(losses.total.detach().cpu()),
             }
@@ -348,9 +420,15 @@ def main() -> None:
     parser.add_argument("--gradient-sample-count", type=int, default=8)
     parser.add_argument("--loss-atol", type=float, default=0.01)
     parser.add_argument("--loss-rtol", type=float, default=0.01)
-    parser.add_argument("--logit-atol", type=float, default=0.05)
+    parser.add_argument("--probability-atol", type=float, default=0.005)
+    parser.add_argument("--centered-logit-atol", type=float, default=0.10)
     parser.add_argument("--gradient-cosine-min", type=float, default=0.995)
     parser.add_argument("--gradient-relative-l2-max", type=float, default=0.10)
+    parser.add_argument(
+        "--selection-report",
+        type=Path,
+        help="Reuse and validate row indices from an earlier benchmark instead of rescanning",
+    )
     args = parser.parse_args()
     if args.warmups < 0 or min(args.repeats, args.gradient_sample_count) < 1:
         parser.error(
@@ -395,14 +473,27 @@ def main() -> None:
         require_no_state_truncation=bool(config.get("require_no_state_truncation", False)),
     )
     dataset.set_epoch(0)
-    print(f"scanning {len(dataset)} real epoch-0 training rows for length cases", flush=True)
-    lengths = _scan_training_lengths(dataset)
+    if args.selection_report is None:
+        print(
+            f"scanning {len(dataset)} real epoch-0 training rows for length cases",
+            flush=True,
+        )
+        lengths = _scan_training_lengths(dataset)
+        selections = select_length_cases(lengths)
+    else:
+        with args.selection_report.open(encoding="utf-8") as handle:
+            selection_report = json.load(handle)
+        selections = reused_length_cases(selection_report, len(dataset))
+        print(
+            f"reusing validated row indices from {args.selection_report}; full length scan skipped",
+            flush=True,
+        )
     collator = DecisionCollator(
         tokenizer,
         max_choices=int(config["max_choices"]),
         max_questions=int(config["max_questions"]),
     )
-    cases = _build_cases(dataset, collator, lengths)
+    cases = _build_cases(dataset, collator, selections)
     for case in cases:
         print(
             f"selected {case['name']} ids={case['ids']} sources={case['sources']} "
@@ -433,6 +524,12 @@ def main() -> None:
         eager_capture = backend_captures["eager"][name]
         sdpa_capture = backend_captures["sdpa"][name]
         logit_delta = float((eager_capture["logits"] - sdpa_capture["logits"]).abs().max())
+        centered_logit_delta = float(
+            (eager_capture["centered_logits"] - sdpa_capture["centered_logits"]).abs().max()
+        )
+        probability_delta = float(
+            (eager_capture["probabilities"] - sdpa_capture["probabilities"]).abs().max()
+        )
         loss_delta = abs(eager_capture["loss"] - sdpa_capture["loss"])
         loss_tolerance = args.loss_atol + args.loss_rtol * abs(eager_capture["loss"])
         gradient = _gradient_comparison(
@@ -440,7 +537,8 @@ def main() -> None:
         )
         equivalence_passed = (
             loss_delta <= loss_tolerance
-            and logit_delta <= args.logit_atol
+            and probability_delta <= args.probability_atol
+            and centered_logit_delta <= args.centered_logit_atol
             and gradient["cosine_similarity"] >= args.gradient_cosine_min
             and gradient["relative_l2"] <= args.gradient_relative_l2_max
         )
@@ -453,6 +551,8 @@ def main() -> None:
             "loss_absolute_delta": loss_delta,
             "loss_tolerance": loss_tolerance,
             "max_valid_logit_delta": logit_delta,
+            "max_centered_logit_delta": centered_logit_delta,
+            "max_probability_delta": probability_delta,
             "gradient": gradient,
             "equivalence_passed": equivalence_passed,
         }
@@ -460,7 +560,9 @@ def main() -> None:
         print(
             f"compare {name} speedup={comparison['eager_over_sdpa_speedup']:.2f}x "
             f"peak_delta={comparison['sdpa_peak_extra_mib_delta']:+.1f}MiB "
-            f"loss_delta={loss_delta:.6f} logit_delta={logit_delta:.6f} "
+            f"loss_delta={loss_delta:.6f} raw_logit_delta={logit_delta:.6f} "
+            f"centered_logit_delta={centered_logit_delta:.6f} "
+            f"probability_delta={probability_delta:.6f} "
             f"grad_cos={gradient['cosine_similarity']:.6f} "
             f"grad_rel_l2={gradient['relative_l2']:.6f} "
             f"equivalent={equivalence_passed}",
@@ -482,14 +584,20 @@ def main() -> None:
         "dtype": "torch.bfloat16",
         "method": (
             "same seeded epoch-0 real training batches; trainable saved LoRA and decision "
-            "head; gradient checkpointing; autocast BF16; forward plus backward only"
+            "head; gradient checkpointing; autocast BF16; forward plus backward only; "
+            "equivalence gated on probabilities, centered logits, loss, and gradients; "
+            "raw logits retained as an informational diagnostic"
+        ),
+        "selection_report": (
+            str(args.selection_report) if args.selection_report is not None else None
         ),
         "warmups": args.warmups,
         "repeats": args.repeats,
         "thresholds": {
             "loss_atol": args.loss_atol,
             "loss_rtol": args.loss_rtol,
-            "logit_atol": args.logit_atol,
+            "probability_atol": args.probability_atol,
+            "centered_logit_atol": args.centered_logit_atol,
             "gradient_cosine_min": args.gradient_cosine_min,
             "gradient_relative_l2_max": args.gradient_relative_l2_max,
             "geometric_speedup_min": 1.05,
