@@ -17,11 +17,13 @@ class DecisionModel(nn.Module):
         hidden_size: int,
         max_choices: int = 255,
         base_model_id: str | None = None,
+        attn_implementation: str = "eager",
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.max_choices = max_choices
         self.base_model_id = base_model_id
+        self.attn_implementation = attn_implementation
         self.decision_head = nn.Linear(hidden_size, 1)
 
     @classmethod
@@ -60,6 +62,7 @@ class DecisionModel(nn.Module):
             hidden_size=hidden_size,
             max_choices=max_choices,
             base_model_id=model_id,
+            attn_implementation=attn_implementation,
         )
         del causal_lm
         return model
@@ -146,21 +149,43 @@ class DecisionModel(nn.Module):
     ) -> torch.Tensor:
         if decision_indices.ndim != 3:
             raise ValueError("decision_indices must have shape [batch, questions, choices]")
-        mask_dtype = next(self.backbone.parameters()).dtype
-        additive_mask = torch.zeros(
-            (*tree_attention_mask.shape[:1], 1, *tree_attention_mask.shape[1:]),
-            dtype=mask_dtype,
-            device=tree_attention_mask.device,
-        )
-        additive_mask.masked_fill_(
-            ~tree_attention_mask.unsqueeze(1), torch.finfo(mask_dtype).min
-        )
+        if self.attn_implementation == "flex_attention":
+            from torch.nn.attention.flex_attention import create_block_mask
+
+            def tree_mask_mod(
+                batch_index: torch.Tensor,
+                _head_index: torch.Tensor,
+                query_index: torch.Tensor,
+                key_index: torch.Tensor,
+            ) -> torch.Tensor:
+                return tree_attention_mask[batch_index, query_index, key_index]
+
+            sequence_length = tree_attention_mask.shape[-1]
+            attention_mask = create_block_mask(
+                tree_mask_mod,
+                B=tree_attention_mask.shape[0],
+                H=None,
+                Q_LEN=sequence_length,
+                KV_LEN=sequence_length,
+                device=tree_attention_mask.device,
+                _compile=True,
+            )
+        else:
+            mask_dtype = next(self.backbone.parameters()).dtype
+            attention_mask = torch.zeros(
+                (*tree_attention_mask.shape[:1], 1, *tree_attention_mask.shape[1:]),
+                dtype=mask_dtype,
+                device=tree_attention_mask.device,
+            )
+            attention_mask.masked_fill_(
+                ~tree_attention_mask.unsqueeze(1), torch.finfo(mask_dtype).min
+            )
 
         # Passing the layer-name mapping bypasses Transformers' ordinary triangular
         # mask construction and supplies our shared-prefix/tree topology directly.
         outputs = self.backbone(
             input_ids=input_ids,
-            attention_mask={"full_attention": additive_mask},
+            attention_mask={"full_attention": attention_mask},
             position_ids=position_ids,
             use_cache=False,
             return_dict=True,

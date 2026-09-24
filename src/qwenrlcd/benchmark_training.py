@@ -411,10 +411,20 @@ def _run_backend(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare eager and SDPA on real BF16 training forward/backward passes"
+        description="Compare attention backends on real BF16 training forward/backward passes"
     )
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--reference-backend",
+        choices=("eager", "sdpa", "flex_attention"),
+        default="eager",
+    )
+    parser.add_argument(
+        "--candidate-backend",
+        choices=("eager", "sdpa", "flex_attention"),
+        default="sdpa",
+    )
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--gradient-sample-count", type=int, default=8)
@@ -434,9 +444,13 @@ def main() -> None:
         parser.error(
             "repeats and gradient sample count must be positive; warmups cannot be negative"
         )
+    if args.reference_backend == args.candidate_backend:
+        parser.error("reference and candidate backends must differ")
     if not (args.run_dir / "final" / "decision_head.pt").is_file():
         parser.error(f"no saved decision model in {args.run_dir / 'final'}")
-    output_path = args.output or args.run_dir / "sdpa_training_benchmark.json"
+    output_path = args.output or (
+        args.run_dir / f"{args.candidate_backend}_training_benchmark.json"
+    )
     if output_path.exists():
         parser.error(f"refusing to overwrite existing benchmark: {output_path}")
 
@@ -504,7 +518,7 @@ def main() -> None:
 
     backend_results: dict[str, Any] = {}
     backend_captures: dict[str, dict[str, dict[str, Any]]] = {}
-    for backend in ("eager", "sdpa"):
+    for backend in (args.reference_backend, args.candidate_backend):
         backend_results[backend], backend_captures[backend] = _run_backend(
             backend,
             cases,
@@ -519,21 +533,29 @@ def main() -> None:
     comparisons = []
     for case in cases:
         name = case["name"]
-        eager = backend_results["eager"]["cases"][name]
-        sdpa = backend_results["sdpa"]["cases"][name]
-        eager_capture = backend_captures["eager"][name]
-        sdpa_capture = backend_captures["sdpa"][name]
-        logit_delta = float((eager_capture["logits"] - sdpa_capture["logits"]).abs().max())
+        reference = backend_results[args.reference_backend]["cases"][name]
+        candidate = backend_results[args.candidate_backend]["cases"][name]
+        reference_capture = backend_captures[args.reference_backend][name]
+        candidate_capture = backend_captures[args.candidate_backend][name]
+        logit_delta = float(
+            (reference_capture["logits"] - candidate_capture["logits"]).abs().max()
+        )
         centered_logit_delta = float(
-            (eager_capture["centered_logits"] - sdpa_capture["centered_logits"]).abs().max()
+            (
+                reference_capture["centered_logits"]
+                - candidate_capture["centered_logits"]
+            ).abs().max()
         )
         probability_delta = float(
-            (eager_capture["probabilities"] - sdpa_capture["probabilities"]).abs().max()
+            (
+                reference_capture["probabilities"]
+                - candidate_capture["probabilities"]
+            ).abs().max()
         )
-        loss_delta = abs(eager_capture["loss"] - sdpa_capture["loss"])
-        loss_tolerance = args.loss_atol + args.loss_rtol * abs(eager_capture["loss"])
+        loss_delta = abs(reference_capture["loss"] - candidate_capture["loss"])
+        loss_tolerance = args.loss_atol + args.loss_rtol * abs(reference_capture["loss"])
         gradient = _gradient_comparison(
-            eager_capture["gradients"], sdpa_capture["gradients"], torch
+            reference_capture["gradients"], candidate_capture["gradients"], torch
         )
         equivalence_passed = (
             loss_delta <= loss_tolerance
@@ -544,9 +566,14 @@ def main() -> None:
         )
         comparison = {
             "name": name,
-            "eager_over_sdpa_speedup": eager["p50_ms"] / sdpa["p50_ms"],
-            "sdpa_peak_extra_mib_delta": (
-                sdpa["peak_above_loaded_model_mib"] - eager["peak_above_loaded_model_mib"]
+            "reference_backend": args.reference_backend,
+            "candidate_backend": args.candidate_backend,
+            "reference_over_candidate_speedup": (
+                reference["p50_ms"] / candidate["p50_ms"]
+            ),
+            "candidate_peak_extra_mib_delta": (
+                candidate["peak_above_loaded_model_mib"]
+                - reference["peak_above_loaded_model_mib"]
             ),
             "loss_absolute_delta": loss_delta,
             "loss_tolerance": loss_tolerance,
@@ -558,8 +585,10 @@ def main() -> None:
         }
         comparisons.append(comparison)
         print(
-            f"compare {name} speedup={comparison['eager_over_sdpa_speedup']:.2f}x "
-            f"peak_delta={comparison['sdpa_peak_extra_mib_delta']:+.1f}MiB "
+            f"compare {name} reference={args.reference_backend} "
+            f"candidate={args.candidate_backend} "
+            f"speedup={comparison['reference_over_candidate_speedup']:.2f}x "
+            f"peak_delta={comparison['candidate_peak_extra_mib_delta']:+.1f}MiB "
             f"loss_delta={loss_delta:.6f} raw_logit_delta={logit_delta:.6f} "
             f"centered_logit_delta={centered_logit_delta:.6f} "
             f"probability_delta={probability_delta:.6f} "
@@ -569,19 +598,23 @@ def main() -> None:
             flush=True,
         )
 
-    speedups = [comparison["eager_over_sdpa_speedup"] for comparison in comparisons]
+    speedups = [
+        comparison["reference_over_candidate_speedup"] for comparison in comparisons
+    ]
     geometric_speedup = math.prod(speedups) ** (1 / len(speedups))
     equivalence_passed = all(item["equivalence_passed"] for item in comparisons)
     performance_passed = (
         geometric_speedup >= 1.05
         and min(speedups) >= 0.95
-        and all(item["sdpa_peak_extra_mib_delta"] <= 0 for item in comparisons)
+        and all(item["candidate_peak_extra_mib_delta"] <= 0 for item in comparisons)
     )
     report = {
         "run_dir": str(args.run_dir),
         "gpu": torch.cuda.get_device_name(),
         "torch": torch.__version__,
         "dtype": "torch.bfloat16",
+        "reference_backend": args.reference_backend,
+        "candidate_backend": args.candidate_backend,
         "method": (
             "same seeded epoch-0 real training batches; trainable saved LoRA and decision "
             "head; gradient checkpointing; autocast BF16; forward plus backward only; "
@@ -602,7 +635,7 @@ def main() -> None:
             "gradient_relative_l2_max": args.gradient_relative_l2_max,
             "geometric_speedup_min": 1.05,
             "per_case_speedup_min": 0.95,
-            "sdpa_peak_memory_must_not_increase": True,
+            "candidate_peak_memory_must_not_increase": True,
         },
         "selection": [
             {key: value for key, value in case.items() if key != "batch"} for case in cases
@@ -624,9 +657,9 @@ def main() -> None:
         flush=True,
     )
     if not equivalence_passed:
-        raise SystemExit("SDPA training equivalence gate failed")
+        raise SystemExit(f"{args.candidate_backend} training equivalence gate failed")
     if not performance_passed:
-        raise SystemExit("SDPA training performance gate failed")
+        raise SystemExit(f"{args.candidate_backend} training performance gate failed")
 
 
 if __name__ == "__main__":

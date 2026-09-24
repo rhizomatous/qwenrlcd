@@ -222,7 +222,7 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument(
         "--attn-implementation",
-        choices=("eager", "sdpa"),
+        choices=("eager", "sdpa", "flex_attention"),
         help="Override the attention backend saved in the training config",
     )
     args = parser.parse_args()

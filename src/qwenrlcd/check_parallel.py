@@ -16,12 +16,12 @@ def main() -> None:
     source.add_argument("--run-dir", type=Path)
     parser.add_argument(
         "--attn-implementation",
-        choices=("eager", "sdpa"),
+        choices=("eager", "sdpa", "flex_attention"),
         help="Override the saved/configured attention backend",
     )
     parser.add_argument(
         "--compare-attn-implementation",
-        choices=("eager", "sdpa"),
+        choices=("eager", "sdpa", "flex_attention"),
         help="Also require matching logits from this second backend",
     )
     parser.add_argument("--atol", type=float, default=0.0001)
