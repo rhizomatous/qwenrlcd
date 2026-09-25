@@ -121,6 +121,7 @@ uv run python - \
   "$QWENRLCD_EXPERIMENT_DIR" \
   "$QWENRLCD_WINNER" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -194,19 +195,46 @@ steps = int(sys.argv[2])
 with (root / "block-selection.json").open(encoding="utf-8") as handle:
     selection = json.load(handle)
 timings = {}
+tail_timings = {}
 for name in ("sdpa", "flex"):
     with (root / f"calibration-{name}" / "training_timing.json").open(encoding="utf-8") as handle:
         timings[name] = json.load(handle)
     if int(timings[name]["current_step"]) < steps:
         raise SystemExit(f"calibration-{name} did not reach step {steps}")
+    snapshots = {}
+    pattern = re.compile(r"step=(\d+)/\d+.*step_s=([0-9.]+)")
+    for line in (root / f"calibration-{name}.log").read_text(encoding="utf-8").splitlines():
+        if match := pattern.search(line):
+            snapshots[int(match.group(1))] = float(match.group(2))
+    end_step = max(step for step in snapshots if step <= steps)
+    start_step = max(step for step in snapshots if step <= end_step // 2)
+    end_elapsed = end_step * snapshots[end_step]
+    start_elapsed = start_step * snapshots[start_step]
+    tail_timings[name] = {
+        "start_step": start_step,
+        "end_step": end_step,
+        "seconds_per_optimizer_step": (
+            (end_elapsed - start_elapsed) / (end_step - start_step)
+        ),
+    }
 sdpa_step = float(timings["sdpa"]["seconds_per_optimizer_step"])
 flex_step = float(timings["flex"]["seconds_per_optimizer_step"])
+sdpa_tail = tail_timings["sdpa"]["seconds_per_optimizer_step"]
+flex_tail = tail_timings["flex"]["seconds_per_optimizer_step"]
+recommended_backend = "flex_attention" if flex_tail < 0.97 * sdpa_tail else "sdpa"
 report = {
     "calibration_steps": steps,
     "selected_flex_block_size": selection["winner"],
     "sdpa_seconds_per_optimizer_step": sdpa_step,
     "flex_seconds_per_optimizer_step": flex_step,
     "sdpa_over_flex_speedup": sdpa_step / flex_step,
+    "tail_window": tail_timings,
+    "tail_sdpa_over_flex_speedup": sdpa_tail / flex_tail,
+    "recommended_training_backend": recommended_backend,
+    "recommendation_rule": (
+        "Prefer Flex only when its second-half marginal step time is at least 3% "
+        "faster; otherwise prefer simpler, lower-startup SDPA"
+    ),
     "projected_full_training_hours": {
         "sdpa": sdpa_step * int(timings["sdpa"]["total_steps"]) / 3600,
         "flex": flex_step * int(timings["flex"]["total_steps"]) / 3600,
@@ -222,6 +250,8 @@ print(
     f"sdpa_step_s={sdpa_step:.3f}",
     f"flex_step_s={flex_step:.3f}",
     f"speedup={report['sdpa_over_flex_speedup']:.2f}x",
+    f"tail_speedup={report['tail_sdpa_over_flex_speedup']:.2f}x",
+    f"recommended={recommended_backend}",
 )
 print(f"[compact-flex] report: {root / 'final-report.json'}")
 PY
