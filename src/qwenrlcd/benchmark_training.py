@@ -627,6 +627,10 @@ def main() -> None:
         "reference_backend": args.reference_backend,
         "candidate_backend": args.candidate_backend,
         "flex_block_size": args.flex_block_size,
+        "flex_kernel_options": {
+            "fwd_BLOCK_M": args.flex_block_size,
+            "fwd_BLOCK_N": 64,
+        },
         "attention_topology_input": (
             "compact_token_labels"
             if "flex_attention" in (args.reference_backend, args.candidate_backend)

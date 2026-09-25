@@ -48,7 +48,7 @@ done
 
 echo "[compact-flex] stage 2/4: compare 64- and 128-token Flex blocks"
 for QWENRLCD_BLOCK_SIZE in 64 128; do
-  QWENRLCD_BLOCK_REPORT="$QWENRLCD_EXPERIMENT_DIR/block-${QWENRLCD_BLOCK_SIZE}.json"
+  QWENRLCD_BLOCK_REPORT="$QWENRLCD_EXPERIMENT_DIR/block-${QWENRLCD_BLOCK_SIZE}-tiled.json"
   if [ -f "$QWENRLCD_BLOCK_REPORT" ]; then
     echo "[compact-flex] reusing $QWENRLCD_BLOCK_REPORT"
   else
@@ -69,8 +69,8 @@ for QWENRLCD_BLOCK_SIZE in 64 128; do
 done
 
 QWENRLCD_WINNER="$(uv run python - \
-  "$QWENRLCD_EXPERIMENT_DIR/block-64.json" \
-  "$QWENRLCD_EXPERIMENT_DIR/block-128.json" \
+  "$QWENRLCD_EXPERIMENT_DIR/block-64-tiled.json" \
+  "$QWENRLCD_EXPERIMENT_DIR/block-128-tiled.json" \
   "$QWENRLCD_EXPERIMENT_DIR/block-selection.json" <<'PY'
 import json
 import math
@@ -169,11 +169,13 @@ PY
     if compgen -G "$output/checkpoint-*" >/dev/null; then
       args+=(--resume-from latest)
     else
-      echo "[compact-flex] $output exists without a resumable checkpoint" >&2
-      exit 2
+      local failed_output="${output}.failed-$(date -u +%Y%m%dT%H%M%SZ)"
+      echo "[compact-flex] archiving non-resumable $output as $failed_output"
+      mv "$output" "$failed_output"
     fi
   fi
-  uv run qwenrlcd-train "${args[@]}" 2>&1 | tee "$QWENRLCD_EXPERIMENT_DIR/calibration-${name}.log"
+  uv run qwenrlcd-train "${args[@]}" 2>&1 \
+    | tee -a "$QWENRLCD_EXPERIMENT_DIR/calibration-${name}.log"
 }
 
 echo "[compact-flex] stage 4/4: matched $QWENRLCD_CALIBRATION_STEPS-step calibrations"

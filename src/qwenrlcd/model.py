@@ -340,12 +340,26 @@ class DecisionModel(nn.Module):
 
         # Passing the layer-name mapping bypasses Transformers' ordinary triangular
         # mask construction and supplies our shared-prefix/tree topology directly.
+        # Dynamic training shapes can route Torch 2.14 through its Flex "decode"
+        # lowering even with use_cache=False. Its default 256-row tile is not
+        # divisible into our 64/128-row sparse blocks, so pin compatible forward
+        # tiles. This changes kernel tiling only; the BlockMask remains exact.
         outputs = self.backbone(
             input_ids=input_ids,
             attention_mask={"full_attention": attention_mask},
             position_ids=position_ids,
             use_cache=False,
             return_dict=True,
+            **(
+                {
+                    "kernel_options": {
+                        "fwd_BLOCK_M": self.flex_block_size,
+                        "fwd_BLOCK_N": 64,
+                    }
+                }
+                if self.attn_implementation == "flex_attention"
+                else {}
+            ),
         )
         hidden_states = outputs.last_hidden_state
 
