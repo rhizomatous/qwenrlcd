@@ -239,6 +239,10 @@ report = {
         "sdpa": sdpa_step * int(timings["sdpa"]["total_steps"]) / 3600,
         "flex": flex_step * int(timings["flex"]["total_steps"]) / 3600,
     },
+    "projected_full_training_hours_from_tail": {
+        "sdpa": sdpa_tail * int(timings["sdpa"]["total_steps"]) / 3600,
+        "flex": flex_tail * int(timings["flex"]["total_steps"]) / 3600,
+    },
     "block_selection": selection,
 }
 (root / "final-report.json").write_text(
