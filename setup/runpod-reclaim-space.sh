@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Retain completed run artifacts; preview first, pass --apply to remove old checkpoints.
+# Retain completed model artifacts; preview first, pass --apply to remove their checkpoints.
 set -euo pipefail
 
 if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--apply" ]; }; then
@@ -12,31 +12,36 @@ QWENRLCD_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "$QWENRLCD_SETUP_DIR/runpod-activate.sh"
 export PYTHONPATH="$QWENRLCD_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
-QWENRLCD_COMPLETED_RUNS=(
-  outputs/qwen3-1.7b-resume-test
-  outputs/qwen3-1.7b-resume-test-reference
-  outputs/qwen3-1.7b-choice-diagnostic-v0
-  outputs/qwen3-1.7b-core-pilot-v0
-)
+shopt -s nullglob
+QWENRLCD_COMPLETED_RUNS=()
+for QWENRLCD_RUN in outputs/*; do
+  if [ ! -d "$QWENRLCD_RUN" ] || [ -L "$QWENRLCD_RUN" ]; then
+    continue
+  fi
+  if [ ! -f "$QWENRLCD_RUN/training_config.json" ] \
+    || [ ! -f "$QWENRLCD_RUN/validation_metrics.json" ] \
+    || [ ! -f "$QWENRLCD_RUN/final/decision_head.pt" ] \
+    || [ ! -f "$QWENRLCD_RUN/final/decision_config.json" ]; then
+    continue
+  fi
+  if compgen -G "$QWENRLCD_RUN/checkpoint-*" >/dev/null \
+    || compgen -G "$QWENRLCD_RUN/.checkpoint-*.incomplete" >/dev/null; then
+    QWENRLCD_COMPLETED_RUNS+=("$QWENRLCD_RUN")
+  fi
+done
 
-echo "[reclaim] previewing all targets"
+echo "[reclaim] previewing checkpoints from ${#QWENRLCD_COMPLETED_RUNS[@]} completed runs"
 for QWENRLCD_RUN in "${QWENRLCD_COMPLETED_RUNS[@]}"; do
   .venv/bin/python -m qwenrlcd.prune_checkpoints \
-    --run-dir "$QWENRLCD_RUN" --keep 0
+    --run-dir "$QWENRLCD_RUN" --keep 0 --include-incomplete
 done
-.venv/bin/python -m qwenrlcd.prune_checkpoints \
-  --run-dir outputs/qwen3-1.7b-choice-capacity-32-v0 \
-  --keep 1 --include-incomplete
 
 if [ "${1:-}" = "--apply" ]; then
   echo "[reclaim] applying only the previewed checkpoint cleanup"
   for QWENRLCD_RUN in "${QWENRLCD_COMPLETED_RUNS[@]}"; do
     .venv/bin/python -m qwenrlcd.prune_checkpoints \
-      --run-dir "$QWENRLCD_RUN" --keep 0 --apply
+      --run-dir "$QWENRLCD_RUN" --keep 0 --include-incomplete --apply
   done
-  .venv/bin/python -m qwenrlcd.prune_checkpoints \
-    --run-dir outputs/qwen3-1.7b-choice-capacity-32-v0 \
-    --keep 1 --include-incomplete --apply
 fi
 
 du -sh /workspace
