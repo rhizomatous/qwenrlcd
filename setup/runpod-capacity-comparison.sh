@@ -84,17 +84,17 @@ uv run python - \
 import json
 import sys
 
-from qwenrlcd.compare_capacity import COHORT_KEYS
+from qwenrlcd.compare_capacity import normalized_cohort
 
 with open(sys.argv[1], encoding="utf-8") as handle:
-    control = json.load(handle)
+    control = normalized_cohort(json.load(handle))
 for path in sys.argv[2:]:
     with open(path, encoding="utf-8") as handle:
-        candidate = json.load(handle)
+        candidate = normalized_cohort(json.load(handle))
     differences = {
-        key: (control.get(key), candidate.get(key))
-        for key in COHORT_KEYS
-        if control.get(key) != candidate.get(key)
+        key: (control[key], candidate[key])
+        for key in control
+        if control[key] != candidate[key]
     }
     if differences:
         raise SystemExit(f"capacity cohort mismatch in {path}: {differences}")

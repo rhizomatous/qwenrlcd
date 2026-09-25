@@ -29,6 +29,17 @@ COHORT_KEYS = (
     "ordinal_rps_weight",
 )
 
+COHORT_DEFAULTS = {
+    "ordinal_rps_weight": 0.0,
+}
+
+
+def normalized_cohort(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: config.get(key, COHORT_DEFAULTS.get(key))
+        for key in COHORT_KEYS
+    }
+
 
 def load_run(run_dir: str | Path) -> dict[str, Any]:
     path = Path(run_dir)
@@ -58,14 +69,13 @@ def load_run(run_dir: str | Path) -> dict[str, Any]:
 
 def validate_same_cohort(runs: dict[str, dict[str, Any]]) -> dict[str, Any]:
     labels = list(runs)
-    reference = runs[labels[0]]["config"]
-    cohort = {key: reference.get(key) for key in COHORT_KEYS}
+    cohort = normalized_cohort(runs[labels[0]]["config"])
     for label in labels[1:]:
-        candidate = runs[label]["config"]
+        candidate = normalized_cohort(runs[label]["config"])
         differences = {
-            key: (reference.get(key), candidate.get(key))
+            key: (cohort[key], candidate[key])
             for key in COHORT_KEYS
-            if reference.get(key) != candidate.get(key)
+            if cohort[key] != candidate[key]
         }
         if differences:
             raise ValueError(

@@ -66,11 +66,13 @@ def example_run(*, model_id: str, adaptation: str, brier: float) -> dict:
 
 
 def test_capacity_report_compares_one_cohort_without_test_splits() -> None:
+    control = example_run(
+        model_id="Qwen/Qwen3-1.7B-Base", adaptation="lora", brier=0.10
+    )
+    del control["config"]["ordinal_rps_weight"]
     report = build_report(
         {
-            "control": example_run(
-                model_id="Qwen/Qwen3-1.7B-Base", adaptation="lora", brier=0.10
-            ),
+            "control": control,
             "full_finetune": example_run(
                 model_id="Qwen/Qwen3-1.7B-Base",
                 adaptation="full_finetune",
