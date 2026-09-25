@@ -151,34 +151,67 @@ class DecisionModel(nn.Module):
         if decision_config.get("head_architecture") != "per_option":
             raise ValueError("saved model is not a per-option decision model")
 
-        resolved_model_id = model_id or decision_config.get("base_model_id")
-        if not resolved_model_id:
-            raise ValueError("base model id is required to reload saved components")
-
-        model = cls.from_pretrained(
-            resolved_model_id,
-            max_choices=int(decision_config["max_choices"]),
-            dtype=dtype,
-            trust_remote_code=trust_remote_code,
-            attn_implementation=attn_implementation,
-            flex_block_size=int(
-                flex_block_size
-                if flex_block_size is not None
-                else decision_config.get("flex_block_size", 128)
-            ),
-        )
-
-        adapter_dir = source / "backbone"
-        if not (adapter_dir / "adapter_config.json").is_file():
-            raise ValueError(
-                f"{adapter_dir} is not a saved PEFT adapter; full-backbone reload "
-                "is not implemented"
+        backbone_dir = source / "backbone"
+        storage = decision_config.get("backbone_storage")
+        if storage is None:  # Backward compatibility with pre-metadata LoRA exports.
+            storage = (
+                "peft_adapter"
+                if (backbone_dir / "adapter_config.json").is_file()
+                else "full_model"
             )
-        from peft import PeftModel
-
-        model.backbone = PeftModel.from_pretrained(
-            model.backbone, adapter_dir, is_trainable=is_trainable
+        resolved_flex_block_size = int(
+            flex_block_size
+            if flex_block_size is not None
+            else decision_config.get("flex_block_size", 128)
         )
+
+        if storage == "peft_adapter":
+            resolved_model_id = model_id or decision_config.get("base_model_id")
+            if not resolved_model_id:
+                raise ValueError("base model id is required to reload a PEFT adapter")
+            model = cls.from_pretrained(
+                resolved_model_id,
+                max_choices=int(decision_config["max_choices"]),
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+                attn_implementation=attn_implementation,
+                flex_block_size=resolved_flex_block_size,
+            )
+            if not (backbone_dir / "adapter_config.json").is_file():
+                raise ValueError(f"missing PEFT adapter config in {backbone_dir}")
+            from peft import PeftModel
+
+            model.backbone = PeftModel.from_pretrained(
+                model.backbone, backbone_dir, is_trainable=is_trainable
+            )
+        elif storage == "full_model":
+            from transformers import AutoModel
+
+            backbone = AutoModel.from_pretrained(
+                backbone_dir,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+                attn_implementation=attn_implementation,
+            )
+            config = backbone.config
+            if getattr(config, "model_type", None) != "qwen3":
+                raise ValueError(
+                    "saved full backbone is not a full-attention Qwen3 checkpoint"
+                )
+            hidden_size = getattr(config, "hidden_size", None)
+            if hidden_size is None:
+                raise ValueError("could not determine saved backbone hidden size")
+            model = cls(
+                backbone=backbone,
+                hidden_size=hidden_size,
+                max_choices=int(decision_config["max_choices"]),
+                base_model_id=model_id or decision_config.get("base_model_id"),
+                attn_implementation=attn_implementation,
+                flex_block_size=resolved_flex_block_size,
+            )
+        else:
+            raise ValueError(f"unsupported backbone storage mode: {storage}")
+
         head_state = torch.load(
             source / "decision_head.pt", map_location="cpu", weights_only=True
         )
@@ -373,16 +406,19 @@ class DecisionModel(nn.Module):
         destination = Path(output_dir)
         destination.mkdir(parents=True, exist_ok=True)
 
-        if hasattr(self.backbone, "save_pretrained"):
-            self.backbone.save_pretrained(destination / "backbone")
-        else:
-            torch.save(self.backbone.state_dict(), destination / "backbone.pt")
+        if not hasattr(self.backbone, "save_pretrained"):
+            raise TypeError("backbone must implement save_pretrained for reloadable exports")
+        self.backbone.save_pretrained(destination / "backbone")
+        backbone_storage = (
+            "peft_adapter" if hasattr(self.backbone, "peft_config") else "full_model"
+        )
         torch.save(self.decision_head.state_dict(), destination / "decision_head.pt")
         (destination / "decision_config.json").write_text(
             json.dumps(
                 {
                     "max_choices": self.max_choices,
                     "base_model_id": self.base_model_id,
+                    "backbone_storage": backbone_storage,
                     "attention_topology": "causal_state_question_option_tree",
                     "head_architecture": "per_option",
                     "flex_block_size": self.flex_block_size,

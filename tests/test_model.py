@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import json
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -25,6 +27,19 @@ class EchoBackbone(torch.nn.Module):
         weights = allowed.float() / allowed.sum(dim=-1, keepdim=True)
         return SimpleNamespace(
             last_hidden_state=torch.bmm(weights, self.embedding(input_ids))
+        )
+
+
+class SavedBackbone(EchoBackbone):
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(model_type="qwen3", hidden_size=4)
+
+    def save_pretrained(self, output_dir) -> None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(self.state_dict(), output_dir / "model.pt")
+        (output_dir / "config.json").write_text(
+            json.dumps({"model_type": "qwen3", "hidden_size": 4}), encoding="utf-8"
         )
 
 
@@ -131,3 +146,38 @@ def test_non_flex_model_accepts_compact_topology() -> None:
         decision_indices=compact["decision_indices"],
     )
     torch.testing.assert_close(compact_logits, dense_logits)
+
+
+def test_full_backbone_components_round_trip(tmp_path, monkeypatch) -> None:
+    torch.manual_seed(11)
+    original = DecisionModel(
+        SavedBackbone(), hidden_size=4, max_choices=17,
+        base_model_id="Qwen/Qwen3-1.7B-Base",
+    )
+    output_dir = tmp_path / "final"
+    original.save_components(output_dir)
+    saved_config = json.loads(
+        (output_dir / "decision_config.json").read_text(encoding="utf-8")
+    )
+    assert saved_config["backbone_storage"] == "full_model"
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(path, **_kwargs):
+            backbone = SavedBackbone()
+            backbone.load_state_dict(
+                torch.load(path / "model.pt", map_location="cpu", weights_only=True)
+            )
+            return backbone
+
+    fake_transformers = ModuleType("transformers")
+    fake_transformers.AutoModel = FakeAutoModel
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    restored = DecisionModel.load_components(output_dir, dtype=torch.float32)
+
+    assert restored.max_choices == 17
+    assert restored.base_model_id == "Qwen/Qwen3-1.7B-Base"
+    for expected, actual in zip(
+        original.state_dict().values(), restored.state_dict().values(), strict=True
+    ):
+        torch.testing.assert_close(actual, expected)

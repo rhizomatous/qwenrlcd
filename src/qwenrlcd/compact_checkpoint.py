@@ -41,7 +41,9 @@ def register_compact_model_state_hooks(accelerator: Any) -> None:
                 str(Path(output_dir) / COMPACT_MODEL_FILE),
                 metadata={"format": "qwenrlcd.trainable.v1"},
             )
-        # Prevent Accelerate from serializing the frozen Qwen backbone.
+        # Prevent Accelerate from serializing a second copy of model state. For
+        # LoRA this is compact; for a full fine-tune it necessarily includes the
+        # trainable backbone, but still avoids the redundant default model file.
         weights.clear()
 
     def load_hook(models: list[Any], input_dir: str) -> None:

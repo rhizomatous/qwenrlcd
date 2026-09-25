@@ -81,14 +81,27 @@ def checkpoint_cleanup_candidates(
         raise ValueError(f"not a real run directory: {root}")
     if not (root / "training_config.json").is_file():
         raise ValueError(f"missing training_config.json in {root}")
+    saved_backbone = root / "final" / "backbone"
+    has_adapter = (
+        (saved_backbone / "adapter_config.json").is_file()
+        and (
+            (saved_backbone / "adapter_model.safetensors").is_file()
+            or (saved_backbone / "adapter_model.bin").is_file()
+        )
+    )
+    has_full_model = (
+        (saved_backbone / "config.json").is_file()
+        and (
+            (saved_backbone / "model.safetensors").is_file()
+            or (saved_backbone / "model.safetensors.index.json").is_file()
+            or (saved_backbone / "pytorch_model.bin").is_file()
+            or (saved_backbone / "pytorch_model.bin.index.json").is_file()
+        )
+    )
     if keep_last == 0 and not (
         (root / "final" / "decision_head.pt").is_file()
         and (root / "final" / "decision_config.json").is_file()
-        and (root / "final" / "backbone" / "adapter_config.json").is_file()
-        and (
-            (root / "final" / "backbone" / "adapter_model.safetensors").is_file()
-            or (root / "final" / "backbone" / "adapter_model.bin").is_file()
-        )
+        and (has_adapter or has_full_model)
         and (root / "validation_metrics.json").is_file()
     ):
         raise ValueError("cannot remove all checkpoints without final model and metrics")

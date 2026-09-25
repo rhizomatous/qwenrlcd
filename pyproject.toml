@@ -38,6 +38,7 @@ qwenrlcd-choice-capacity = "qwenrlcd.choice_capacity:main"
 qwenrlcd-choice-capacity-report = "qwenrlcd.choice_capacity_report:main"
 qwenrlcd-benchmark = "qwenrlcd.benchmark:main"
 qwenrlcd-benchmark-training = "qwenrlcd.benchmark_training:main"
+qwenrlcd-compare-capacity = "qwenrlcd.compare_capacity:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qwenrlcd"]

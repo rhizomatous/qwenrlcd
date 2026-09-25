@@ -113,3 +113,21 @@ def test_cannot_prune_all_without_final_artifacts(tmp_path) -> None:
         "checkpoint-1"
     ]
     assert (tmp_path / "final" / "decision_head.pt").exists()
+
+
+def test_can_prune_all_after_full_backbone_export(tmp_path) -> None:
+    (tmp_path / "training_config.json").write_text("{}", encoding="utf-8")
+    checkpoint = tmp_path / "checkpoint-1"
+    TrainerProgress(1, 0, 1, 1, 1).write(checkpoint)
+    (checkpoint / "trainable_model.safetensors").write_bytes(b"weights")
+    backbone = tmp_path / "final" / "backbone"
+    backbone.mkdir(parents=True)
+    (tmp_path / "final" / "decision_head.pt").write_bytes(b"head")
+    (tmp_path / "final" / "decision_config.json").write_text("{}", encoding="utf-8")
+    (backbone / "config.json").write_text("{}", encoding="utf-8")
+    (backbone / "model.safetensors.index.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "validation_metrics.json").write_text("[]", encoding="utf-8")
+
+    assert [path.name for path in prune_checkpoints(tmp_path, keep_last=0)] == [
+        "checkpoint-1"
+    ]
