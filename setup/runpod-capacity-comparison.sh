@@ -26,19 +26,49 @@ run_branch() {
   local label="$1"
   local config="$2"
   local output_dir
+  local -a train_args
   output_dir="$(config_output_dir "$config")"
-  if [ -f "$output_dir/final/decision_head.pt" ] && [ -f "$output_dir/validation_metrics.json" ]; then
+  train_args=(--config "$config")
+  if [ -f "$output_dir/.capacity-complete" ]; then
     echo "[capacity] $label already complete: $output_dir"
+    uv run python - "$output_dir" <<'PY'
+import sys
+
+from qwenrlcd.checkpointing import prune_checkpoints
+
+removed = prune_checkpoints(sys.argv[1], keep_last=0, include_incomplete=True)
+if removed:
+    print("[capacity] removed completed-run checkpoints:", ", ".join(p.name for p in removed))
+PY
     return
   fi
   if [ -e "$output_dir" ]; then
-    echo "[capacity] refusing incomplete existing output: $output_dir" >&2
-    exit 2
+    if compgen -G "$output_dir/checkpoint-*" >/dev/null; then
+      echo "[capacity] resuming $label from its latest checkpoint"
+      train_args+=(--resume-from latest)
+    else
+      echo "[capacity] refusing non-resumable partial output: $output_dir" >&2
+      exit 2
+    fi
+  else
+    echo "[capacity] preflight $label"
+    uv run qwenrlcd-preflight --config "$config"
   fi
-  echo "[capacity] preflight $label"
-  uv run qwenrlcd-preflight --config "$config"
   echo "[capacity] train $label"
-  uv run qwenrlcd-train --config "$config"
+  uv run qwenrlcd-train "${train_args[@]}"
+  test -f "$output_dir/final/decision_head.pt"
+  test -f "$output_dir/final/decision_config.json"
+  test -f "$output_dir/validation_metrics.json"
+  touch "$output_dir/.capacity-complete"
+  uv run python - "$output_dir" <<'PY'
+import sys
+
+from qwenrlcd.checkpointing import prune_checkpoints
+
+removed = prune_checkpoints(sys.argv[1], keep_last=0, include_incomplete=True)
+if removed:
+    print("[capacity] removed completed-run checkpoints:", ", ".join(p.name for p in removed))
+PY
 }
 
 if [ ! -f "$QWENRLCD_CONTROL_RUN/final/decision_head.pt" ] \

@@ -24,7 +24,7 @@
   "brier_weight": 0.25,
   "ordinal_rps_weight": 0.0,
   "log_every": 50,
-  "save_every": 1000000,
+  "save_every": 625,
   "keep_last_checkpoints": 1,
   "gradient_checkpointing": true,
   "trust_remote_code": true,
