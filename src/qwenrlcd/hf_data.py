@@ -170,7 +170,7 @@ def load_configured_bundles(config: Mapping[str, Any], split: str) -> Sequence[D
             str(config.get("dataset_config", "core")),
             split,
             sample_size=config.get(f"{split}_bundle_limit"),
-            seed=int(config["seed"]),
+            seed=int(config.get("dataset_seed", config["seed"])),
         )
     else:
         if "train_bundle_limit" in config or "validation_bundle_limit" in config:

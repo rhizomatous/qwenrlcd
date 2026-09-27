@@ -8,6 +8,7 @@ import pytest
 from qwenrlcd.hf_data import (
     HFDatasetBundles,
     bundle_from_dataset_row,
+    load_configured_bundles,
     select_question_type,
     source_stratified_indices,
 )
@@ -84,3 +85,22 @@ def test_question_type_filter_keeps_bundle_and_option_targets() -> None:
     assert selected[0].questions[0].target_vector() == [0.75, 0.25]
     with pytest.raises(ValueError, match="no score questions"):
         select_question_type(selected, QuestionType.SCORE)
+
+
+def test_dataset_seed_can_be_fixed_independently_from_training_seed(monkeypatch) -> None:
+    calls = []
+
+    def fake_load(path, config, split, *, sample_size, seed):
+        calls.append((path, config, split, sample_size, seed))
+        return []
+
+    monkeypatch.setattr("qwenrlcd.hf_data.load_hf_bundles", fake_load)
+    config = {
+        "dataset_path": "fixture",
+        "dataset_config": "core",
+        "train_bundle_limit": 10,
+        "seed": 29,
+        "dataset_seed": 17,
+    }
+    assert load_configured_bundles(config, "train") == []
+    assert calls == [("fixture", "core", "train", 10, 17)]

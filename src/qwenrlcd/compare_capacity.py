@@ -11,6 +11,7 @@ COHORT_KEYS = (
     "train_bundle_limit",
     "validation_bundle_limit",
     "seed",
+    "dataset_seed",
     "max_length",
     "max_questions",
     "max_choices",
@@ -35,10 +36,12 @@ COHORT_DEFAULTS = {
 
 
 def normalized_cohort(config: dict[str, Any]) -> dict[str, Any]:
-    return {
+    cohort = {
         key: config.get(key, COHORT_DEFAULTS.get(key))
         for key in COHORT_KEYS
     }
+    cohort["dataset_seed"] = config.get("dataset_seed", config["seed"])
+    return cohort
 
 
 def load_run(run_dir: str | Path) -> dict[str, Any]:
