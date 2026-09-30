@@ -137,7 +137,9 @@ def compare_choice_rows(
         if first["source"] != second["source"]:
             raise ValueError(f"source differs for {identity}")
 
-        def keyed(row: dict[str, Any], field: str) -> dict[str, float]:
+        def keyed(
+            row: dict[str, Any], field: str, identity: tuple[str, str] = identity
+        ) -> dict[str, float]:
             keys = [option["key"] for option in row["options"]]
             values = row[field]
             if len(keys) != len(values) or len(keys) != len(set(keys)):

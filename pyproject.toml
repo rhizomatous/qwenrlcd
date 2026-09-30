@@ -40,6 +40,7 @@ qwenrlcd-benchmark = "qwenrlcd.benchmark:main"
 qwenrlcd-benchmark-training = "qwenrlcd.benchmark_training:main"
 qwenrlcd-compare-capacity = "qwenrlcd.compare_capacity:main"
 qwenrlcd-compare-adaptation = "qwenrlcd.compare_adaptation:main"
+qwenrlcd-evaluate-sealed = "qwenrlcd.evaluate_sealed:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qwenrlcd"]
